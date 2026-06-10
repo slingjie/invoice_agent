@@ -1,0 +1,12 @@
+{
+  "ocr_provider": "async_jobs",
+  "paddleocr_job_url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+  "paddleocr_model": "PaddleOCR-VL-1.5",
+  "paddleocr_doc_parsing_api_url": "https://your-host.aistudio-app.com/layout-parsing",
+  "paddleocr_access_token": "replace-with-your-token",
+  "city_transport_daily_limit": "100",
+  "lodging_daily_limit": "",
+  "llm_base_url": "",
+  "llm_model": "",
+  "llm_api_key_env": "INVOICE_AGENT_LLM_API_KEY"
+}

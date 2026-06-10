@@ -1,0 +1,33 @@
+# 敏感配置（含 API Token/Key）
+invoice_agent_config.json
+
+# 示例发票数据
+测试发票/
+
+# 用户发票数据
+其他发票保存/
+
+# 生成产物
+整理结果预览/
+
+# 临时文件
+tmp_ui_check/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 内部测试记录
+测试问题记录.md
+
+# 本地副本文档
+发票识别链路文档_副本.html
+发票识别链路文档_副本.md
+
+# 内部设计素材
+前端改造方案.png
+
+# 系统文件
+Thumbs.db
+.DS_Store
