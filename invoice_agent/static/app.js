@@ -9,6 +9,7 @@ const rows = document.getElementById('progress-rows');
 const previewPanel = document.getElementById('preview-panel');
 const previewMain = document.getElementById('preview-main');
 const previewSummary = document.getElementById('preview-summary');
+const previewCompanyForm = document.getElementById('preview-company-form');
 const previewRisks = document.getElementById('preview-risks');
 const previewTripAudit = document.getElementById('preview-trip-audit');
 const previewRename = document.getElementById('preview-rename-content');
@@ -314,6 +315,7 @@ function renderPreview(preview, packageId = null) {
     previewMain.innerHTML = renderTable(preview.main_rows || [], ['序号', '凭证日期', '凭证类别', '报销大类', '是否计入金额', '发票号码', '销方名称', '购方名称', '价税合计', '起点', '终点', '行程/住宿说明', '原文件名', '重复标记', '置信度/风险提示'], 'preview-table main-preview-table', 'main', true);
   }
   previewSummary.innerHTML = renderTable(preview.summary_rows || [], ['报销大类', '计入金额合计', '张数'], 'preview-table summary-preview-table');
+  previewCompanyForm.innerHTML = renderTable(preview.company_form_rows || [], ['序号', '报销大类', '凭证日期', '人员', '销方名称', '行程/住宿说明', '金额', '张数'], 'preview-table company-form-preview-table');
   previewRisks.innerHTML = renderTable(preview.risk_rows || [], ['序号', '原文件名', '凭证类别', '重复标记', '识别状态', '风险提示'], 'preview-table risk-preview-table');
   previewTripAudit.innerHTML = renderTripAudit(preview || {});
   previewRename.innerHTML = renderTable(preview.rename_rows || [], ['序号', '原文件路径', '新文件名', '复制后路径', '是否执行'], 'preview-table rename-preview-table', 'rename');

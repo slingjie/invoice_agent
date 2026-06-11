@@ -31,3 +31,16 @@ __pycache__/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# WorkBuddy 内部数据
+.workbuddy/
+
+# 临时检查脚本与结果
+check_classification_v2.py
+check_result.txt
+check_v2_out.txt
+classification_analysis_report.txt
+final_result.txt
+
+# Windows 系统文件
+nul

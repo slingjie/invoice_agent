@@ -512,7 +512,7 @@ def test_category_summary_uses_fixed_reimbursement_categories(tmp_path: Path):
         make_record(tmp_path, "hotel.pdf", "住宿发票", "20.00"),
         make_record(tmp_path, "didi.pdf", "网约车发票", "30.00"),
         make_record(tmp_path, "toll.pdf", "通行费发票", "40.00"),
-        make_record(tmp_path, "fuel.pdf", "普通/专用发票", "50.00", seller_name="中国石化销售有限公司"),
+        make_record(tmp_path, "fuel.pdf", "普票", "50.00", seller_name="中国石化销售有限公司"),
         make_record(tmp_path, "refund.pdf", "高铁发票", "60.00", description="退票费"),
         make_record(
             tmp_path,
@@ -699,7 +699,7 @@ def test_load_agent_config_reads_local_paddleocr_settings(tmp_path: Path):
                 "paddleocr_doc_parsing_api_url": "https://example.com/layout-parsing",
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "token-from-file",
-                "paddleocr_model": "PaddleOCR-VL-1.5",
+                "paddleocr_model": "PaddleOCR-VL-1.6",
                 "ocr_provider": "async_jobs",
                 "city_transport_daily_limit": "120",
                 "lodging_daily_limit": "450",
@@ -875,7 +875,7 @@ def test_cli_organize_supports_speed_options():
             "--timeout-seconds",
             "60",
             "--ocr-provider",
-            "layout",
+            "async_jobs",
             "--city-transport-daily-limit",
             "120",
             "--lodging-daily-limit",
@@ -886,7 +886,7 @@ def test_cli_organize_supports_speed_options():
 
     assert args.max_workers == 4
     assert args.timeout_seconds == 60
-    assert args.ocr_provider == "layout"
+    assert args.ocr_provider == "async_jobs"
     assert args.city_transport_daily_limit == "120"
     assert args.lodging_daily_limit == "450"
     assert args.enable_llm_review is True
@@ -1115,7 +1115,7 @@ def test_web_flow_previews_before_exporting_excel(tmp_path: Path, monkeypatch):
                 "ocr_provider": "async_jobs",
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
-                "paddleocr_model": "PaddleOCR-VL-1.5",
+                "paddleocr_model": "PaddleOCR-VL-1.6",
             },
         )(),
     )
@@ -1184,7 +1184,7 @@ def test_web_batch_task_snapshot_includes_package_statuses(tmp_path: Path, monke
                 "ocr_provider": "async_jobs",
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
-                "paddleocr_model": "PaddleOCR-VL-1.5",
+                "paddleocr_model": "PaddleOCR-VL-1.6",
             },
         )(),
     )
@@ -1246,7 +1246,7 @@ def test_web_batch_task_publishes_package_preview_before_all_packages_finish(tmp
                 "ocr_provider": "async_jobs",
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
-                "paddleocr_model": "PaddleOCR-VL-1.5",
+                "paddleocr_model": "PaddleOCR-VL-1.6",
             },
         )(),
     )
@@ -1469,7 +1469,7 @@ def test_web_review_progress_rows_include_final_risk_messages(tmp_path: Path, mo
                 "ocr_provider": "async_jobs",
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
-                "paddleocr_model": "PaddleOCR-VL-1.5",
+                "paddleocr_model": "PaddleOCR-VL-1.6",
             },
         )(),
     )

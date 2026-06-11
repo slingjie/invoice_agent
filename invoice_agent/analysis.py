@@ -47,14 +47,20 @@ def assign_reimbursement_category(record: ExpenseRecord) -> str:
             record.raw_text,
         ]
     )
+    if record.document_type == "行程单":
+        if _has_any(text, ["滴滴", "网约车", "出租车", "出租汽车", "地铁"]):
+            return "通行费"
+        if _has_any(text, ["高铁", "铁路", "客票", "机票", "航班"]):
+            return "行程交通费"
+        return "通行费"
     if _has_any(text, ["退票", "改签", "退改", "退改签"]) and _has_any(text, ["高铁", "铁路", "客票", "火车", "机票", "航班"]):
         return "退改费"
+    if _has_any(text, ["滴滴", "网约车", "出租车", "出租汽车", "地铁"]):
+        return "通行费"
     if _has_any(text, ["住宿", "酒店", "宾馆", "旅店"]):
         return "住宿费"
     if _has_any(text, ["油费", "加油", "石油", "石化", "中石油", "中石化"]):
         return "油费"
-    if _has_any(text, ["滴滴", "网约车", "出租车", "出租汽车", "地铁"]):
-        return "通行费"
     if _has_any(text, ["高速", "过路", "路桥", "路网", "车辆通行费", "通行费发票"]):
         return "过路费"
     if _has_any(text, ["市区交通"]):

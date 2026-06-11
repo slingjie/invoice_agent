@@ -47,6 +47,17 @@ MAIN_HEADERS = [
 ]
 
 
+COMPANY_FORM_HEADERS = [
+    "序号",
+    "报销大类",
+    "凭证日期",
+    "人员",
+    "销方名称",
+    "行程/住宿说明",
+    "金额",
+    "张数",
+]
+
 TRIP_AUDIT_HEADERS = ["校对类别", "风险级别", "结论", "证据", "关联序号", "建议动作"]
 
 
@@ -66,6 +77,13 @@ def write_workbook(path: Path, records: List[ExpenseRecord], trip_audit: TripAud
         summary.append([category, float(total), count])
     total, count = _summary_total(summary_rows)
     summary.append(["合计总金额", float(total), count])
+
+    company_form = workbook.create_sheet("公司报销表单汇总")
+    company_form.append(COMPANY_FORM_HEADERS)
+    included = [r for r in records if r.include_in_amount]
+    for record in included:
+        company_form.append(_company_form_row(record))
+    company_form.append(_company_form_total_row(included))
 
     risks = workbook.create_sheet("重复与风险")
     risks.append(["序号", "原文件名", "凭证类别", "重复标记", "识别状态", "风险提示"])
@@ -121,6 +139,24 @@ def write_workbook(path: Path, records: List[ExpenseRecord], trip_audit: TripAud
     workbook.save(path)
 
 
+def _company_form_row(record: ExpenseRecord) -> List[object]:
+    return [
+        record.sequence,
+        record.high_level_category,
+        record.document_date,
+        record.traveler,
+        record.seller_name,
+        record.description,
+        _float_or_blank(record.total_with_tax),
+        1,
+    ]
+
+
+def _company_form_total_row(records: List[ExpenseRecord]) -> List[object]:
+    total, count = _included_total(records)
+    return ["合计", "", "", "", "", "", float(total), count]
+
+
 def _main_row(record: ExpenseRecord) -> List[object]:
     return [
         record.sequence,
@@ -160,6 +196,7 @@ def build_preview(records: List[ExpenseRecord], trip_audit: TripAuditResult | No
     rename_headers = ["序号", "原文件路径", "新文件名", "复制后路径", "是否执行"]
     summary_rows = reimbursement_summary_rows(records)
     summary_total, summary_count = _summary_total(summary_rows)
+    company_total, company_count = _included_total(records)
     return {
         "review_cards": [_review_card(record) for record in records],
         "overview_rows": [_overview_row(record) for record in records],
@@ -174,6 +211,23 @@ def build_preview(records: List[ExpenseRecord], trip_audit: TripAuditResult | No
                 "报销大类": "合计总金额",
                 "计入金额合计": float(summary_total),
                 "张数": summary_count,
+            }
+        ],
+        "company_form_rows": [
+            dict(zip(COMPANY_FORM_HEADERS, _company_form_row(record)))
+            for record in records
+            if record.include_in_amount
+        ]
+        + [
+            {
+                "序号": "合计",
+                "报销大类": "",
+                "凭证日期": "",
+                "人员": "",
+                "销方名称": "",
+                "行程/住宿说明": "",
+                "金额": float(company_total),
+                "张数": company_count,
             }
         ],
         "risk_rows": [
@@ -321,7 +375,7 @@ def _format_sheet(sheet) -> None:
             fill = error_fill
         elif "重复" in joined or "待人工确认" in joined or "金额不一致" in joined:
             fill = warning_fill
-        if values and values[0] == "合计总金额":
+        if values and (values[0] == "合计总金额" or values[0] == "合计"):
             fill = header_fill
             for cell in row:
                 cell.font = Font(bold=True)

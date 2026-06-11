@@ -7,7 +7,7 @@ from typing import Optional
 
 from .config import load_agent_config
 from .models import TripInfo
-from .ocr import PaddleAsyncOcrProvider, PaddleOcrProvider
+from .ocr import PaddleAsyncOcrProvider
 from .pipeline import ORGANIZE_MODE_BATCH_SUBFOLDERS, ORGANIZE_MODE_SINGLE, organize_batch_subfolders, organize_folder
 from .trip_audit import TripAuditPolicy
 from .web import run_ui
@@ -39,10 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
     organize.add_argument("--enable-llm-review", action="store_true", help="启用 OpenAI 兼容大模型行程复核")
     organize.add_argument("--max-workers", type=int, default=3, help="并发识别数量，默认 3")
     organize.add_argument("--timeout-seconds", type=int, default=120, help="单个 OCR 请求超时秒数，默认 120")
+    organize.add_argument("--request-timeout-seconds", type=int, default=60, help="单个 HTTP 请求超时秒数（轮询/下载），默认 60")
+    organize.add_argument("--retry-attempts", type=int, default=3, help="OCR 失败后重试次数，默认 3")
+    organize.add_argument("--retry-delay", type=float, default=1.0, help="重试初始间隔秒数（指数退避），默认 1.0")
     organize.add_argument(
         "--ocr-provider",
-        choices=["async_jobs", "layout"],
-        help="OCR 调用模式；默认读取配置，配置缺省为 async_jobs",
+        choices=["async_jobs"],
+        default="async_jobs",
+        help="OCR 调用模式；默认 async_jobs (PaddleOCR-VL-1.6)",
     )
     ui = subparsers.add_parser("ui", help="启动本地 Web UI")
     ui.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
@@ -59,7 +63,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         trip_info = _trip_info_from_args(args)
         config = load_agent_config(args.config)
-        provider = build_ocr_provider(config, args.ocr_provider, args.timeout_seconds)
+        provider = build_ocr_provider(
+            config,
+            args.ocr_provider,
+            args.timeout_seconds,
+            retry_max_attempts=args.retry_attempts,
+            retry_base_delay_seconds=args.retry_delay,
+            request_timeout_seconds=args.request_timeout_seconds,
+        )
         trip_audit_policy = build_trip_audit_policy(args, config)
         if normalize_mode(args.mode) == ORGANIZE_MODE_BATCH_SUBFOLDERS:
             result = organize_batch_subfolders(
@@ -99,19 +110,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
-def build_ocr_provider(config, provider_name: Optional[str], timeout_seconds: int):
-    provider = provider_name or config.ocr_provider or "async_jobs"
-    if provider == "layout":
-        return PaddleOcrProvider(
-            api_url=config.paddleocr_doc_parsing_api_url or None,
-            access_token=config.paddleocr_access_token or None,
-            timeout_seconds=timeout_seconds,
-        )
+def build_ocr_provider(config, provider_name: Optional[str], timeout_seconds: int,
+                       retry_max_attempts: Optional[int] = None,
+                       retry_base_delay_seconds: Optional[float] = None,
+                       request_timeout_seconds: Optional[int] = None):
     return PaddleAsyncOcrProvider(
         job_url=config.paddleocr_job_url,
         access_token=config.paddleocr_access_token or None,
         model=config.paddleocr_model,
         timeout_seconds=timeout_seconds,
+        request_timeout_seconds=request_timeout_seconds if request_timeout_seconds is not None else config.request_timeout_seconds,
+        retry_max_attempts=retry_max_attempts if retry_max_attempts is not None else config.retry_max_attempts,
+        retry_base_delay_seconds=retry_base_delay_seconds if retry_base_delay_seconds is not None else config.retry_base_delay_seconds,
+        fallback_api_url=config.fallback_api_url or None,
     )
 
 

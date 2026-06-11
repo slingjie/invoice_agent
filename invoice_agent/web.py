@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import load_agent_config
 from .excel import build_preview
 from .models import TripInfo
-from .ocr import PaddleAsyncOcrProvider, PaddleOcrProvider
+from .ocr import PaddleAsyncOcrProvider
 from .pipeline import (
     ORGANIZE_MODE_BATCH_SUBFOLDERS,
     ORGANIZE_MODE_SINGLE,
@@ -126,7 +126,8 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
               </summary>
               <div class="field-stack advanced-grid">
                 {path_field("config", "PaddleOCR 配置文件", DEFAULT_CONFIG_PATH, "file", "full")}
-                {select_field("ocr_provider", "OCR 模式", [("async_jobs", "异步 Job API"), ("layout", "旧版 Layout API")], "async_jobs")}
+                <input type="hidden" name="ocr_provider" value="async_jobs">
+                <span>OCR 模式: PaddleOCR-VL-1.6 异步 Job API</span>
                 {input_field("max_workers", "并发识别数量", "3")}
                 {input_field("timeout_seconds", "单文件超时秒数", "120")}
               </div>
@@ -220,6 +221,7 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
             <div class="preview-tabs" aria-label="预览分区">
               <a href="#preview-main">报销清单</a>
               <a href="#preview-summary">类别汇总</a>
+              <a href="#preview-company-form">公司报销表单汇总</a>
               <a href="#preview-risks">重复与风险</a>
               <a href="#preview-trip-audit">行程校对</a>
               <a href="#preview-rename">重命名计划</a>
@@ -232,6 +234,10 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
             <div class="preview-block">
               <h3>类别汇总</h3>
               <div id="preview-summary"></div>
+            </div>
+            <div class="preview-block">
+              <h3>公司报销表单汇总</h3>
+              <div id="preview-company-form"></div>
             </div>
             <div class="preview-block">
               <h3>重复与风险</h3>
@@ -698,6 +704,9 @@ def run_organize_task(task_id: str, form: Dict[str, str]) -> None:
         update_task(task_id, state="running", stage="扫描文件")
         run_organize_from_form(form, task_id=task_id)
     except Exception as exc:
+        import traceback
+        error_detail = f"{exc}\n{traceback.format_exc()}"
+        print(f"[Task {task_id}] FAILED: {error_detail}")
         update_task(task_id, state="failed", stage="失败", error=str(exc))
 
 
@@ -725,27 +734,32 @@ def get_task_snapshot(task_id: str) -> Dict:
 
 
 def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
+    import logging
+    _log = logging.getLogger("invoice_agent.web")
     folder = Path(required(form, "folder"))
     organize_mode = normalize_organize_mode(form.get("organize_mode"))
     config_path = optional_path(form.get("config"))
     out_dir = optional_path(form.get("out_dir"))
+    _log.info("Loading config from %s", config_path)
     config = load_agent_config(config_path)
+    _log.info("Config loaded: request_timeout=%ds, retry=%d, fallback=%s",
+              config.request_timeout_seconds, config.retry_max_attempts,
+              bool(config.fallback_api_url))
     trip_audit_policy = build_trip_audit_policy(form, config)
     timeout_seconds = parse_positive_int(form.get("timeout_seconds"), 120)
-    provider_name = form.get("ocr_provider") or config.ocr_provider or "async_jobs"
-    if provider_name == "layout":
-        provider = PaddleOcrProvider(
-            api_url=config.paddleocr_doc_parsing_api_url or None,
-            access_token=config.paddleocr_access_token or None,
-            timeout_seconds=timeout_seconds,
-        )
-    else:
-        provider = PaddleAsyncOcrProvider(
-            job_url=config.paddleocr_job_url,
-            access_token=config.paddleocr_access_token or None,
-            model=config.paddleocr_model,
-            timeout_seconds=timeout_seconds,
-        )
+    _log.info("Creating OCR provider: job_url=%s, timeout=%ds, request_timeout=%ds",
+              config.paddleocr_job_url[:50], timeout_seconds, config.request_timeout_seconds)
+    provider = PaddleAsyncOcrProvider(
+        job_url=config.paddleocr_job_url,
+        access_token=config.paddleocr_access_token or None,
+        model=config.paddleocr_model,
+        timeout_seconds=timeout_seconds,
+        request_timeout_seconds=config.request_timeout_seconds,
+        retry_max_attempts=config.retry_max_attempts,
+        retry_base_delay_seconds=config.retry_base_delay_seconds,
+        fallback_api_url=config.fallback_api_url or None,
+    )
+    _log.info("Provider created, starting OCR for folder=%s mode=%s", folder, organize_mode)
     trip_info = TripInfo(
         project_name=form.get("project_name") or folder.name,
         traveler=required(form, "traveler"),
@@ -1200,17 +1214,47 @@ def render_result(output_dir: Path, record_count: int, applied: bool) -> str:
 
 
 def handle_choose_path(query: str) -> Dict[str, str]:
+    import platform
+
     params = parse_qs(query)
     kind = (params.get("kind") or ["folder"])[0]
+    if kind not in ("file", "folder"):
+        return {"error": f"Unsupported chooser kind: {kind}"}
+
+    system = platform.system()
+    if system == "Windows":
+        return _choose_path_windows(kind)
+    return _choose_path_macos(kind)
+
+
+def _choose_path_windows(kind: str) -> Dict[str, str]:
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        if kind == "folder":
+            path = filedialog.askdirectory(title="选择文件夹")
+        else:
+            path = filedialog.askopenfilename(
+                title="选择 PaddleOCR 配置文件 invoice_agent_config.json",
+                filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")],
+            )
+    finally:
+        root.destroy()
+    return {"path": path}
+
+
+def _choose_path_macos(kind: str) -> Dict[str, str]:
     if kind == "file":
         script = (
             'POSIX path of (choose file with prompt '
             '"选择 PaddleOCR 配置文件 invoice_agent_config.json")'
         )
-    elif kind == "folder":
-        script = 'POSIX path of (choose folder with prompt "选择文件夹")'
     else:
-        return {"error": f"Unsupported chooser kind: {kind}"}
+        script = 'POSIX path of (choose folder with prompt "选择文件夹")'
     try:
         result = subprocess.run(
             ["osascript", "-e", script],

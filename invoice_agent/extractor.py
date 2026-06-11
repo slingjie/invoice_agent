@@ -14,7 +14,8 @@ INVOICE_TYPES = {
     "出租车票",
     "通行费发票",
     "餐饮发票",
-    "普通/专用发票",
+    "专用发票",
+    "普票",
     "纸质拍照发票",
 }
 
@@ -80,21 +81,23 @@ def detect_document_type(text: str, path: Path) -> str:
     merged = f"{path.name} {clean_text(text)}"
     if "行程报销单" in merged or "行程单" in merged:
         return "行程单"
+    if re.search(r"滴滴|网约车|客运服务费", merged):
+        return "网约车发票"
     if re.search(r"住宿|酒店|宾馆|旅店", merged):
         return "住宿发票"
     train_no = re.search(r"(?<![A-Za-z0-9])[GD]\d{1,4}(?![A-Za-z0-9])", merged, re.I)
     if re.search(r"火车票|高铁|动车|铁路电子客票|铁路", merged, re.I) or train_no:
         return "高铁发票"
-    if re.search(r"滴滴|网约车|客运服务费", merged):
-        return "网约车发票"
     if re.search(r"出租车|出租汽车", merged):
         return "出租车票"
     if re.search(r"通行费|高速|路网", merged):
         return "通行费发票"
-    if re.search(r"餐饮|饮品|食品|饭店|餐厅", merged):
+    if re.search(r"餐饮|饭店|餐厅", merged):
         return "餐饮发票"
+    if re.search(r"专用发票", merged):
+        return "专用发票"
     if re.search(r"增值税|发票号码|发票代码|电子发票", merged):
-        return "普通/专用发票"
+        return "普票"
     if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".bmp"}:
         return "纸质拍照发票"
     return "其他/无法识别"
