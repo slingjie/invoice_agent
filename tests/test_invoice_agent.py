@@ -214,7 +214,7 @@ def test_build_preview_includes_review_cards_and_lightweight_overview(tmp_path: 
         description="杭州-上海",
     )
     record.sequence = 1
-    record.reimbursement_category = "市区交通费"
+    record.high_level_category = "市区交通费"
     record.buyer_name = "杭州勤合能源科技有限公司"
     record.risk_note = "建议人工确认"
 
@@ -392,10 +392,10 @@ def test_organize_folder_generates_preview_without_copying(tmp_path: Path):
     assert main_headers[8] == "报销大类"
     main_rows = list(main.iter_rows(min_row=2, values_only=True))
     rows_by_name = {row[19]: row for row in main_rows if row[0] != "合计总金额"}
-    assert rows_by_name["invoice.pdf"][8] == "通行费"
+    assert rows_by_name["invoice.pdf"][8] == "交通费"
     assert rows_by_name["duplicate.pdf"][8] in {None, ""}
     assert rows_by_name["trip.pdf"][8] in {None, ""}
-    category_total = sum(row[15] for row in main_rows if row[9] == "是" and row[8] == "通行费")
+    category_total = sum(row[15] for row in main_rows if row[9] == "是" and row[8] == "交通费")
     assert category_total == 88.0
     assert main.cell(row=main.max_row, column=1).value == "合计总金额"
     assert float(main.cell(row=main.max_row, column=16).value) == 88.0
@@ -1129,7 +1129,7 @@ def test_web_flow_previews_before_exporting_excel(tmp_path: Path, monkeypatch):
     assert task["excel_path"] == ""
     assert not (out_dir / "00_报销清单.xlsx").exists()
     assert task["preview"]["main_rows"][0]["原文件名"] == "invoice.pdf"
-    assert task["preview"]["main_rows"][0]["报销大类"] == "通行费"
+    assert task["preview"]["main_rows"][0]["报销大类"] == "交通费"
     assert task["preview"]["summary_rows"][3]["报销大类"] == "通行费"
     assert task["preview"]["summary_rows"][-1]["报销大类"] == "合计总金额"
     assert task["preview"]["trip_audit_rows"]
@@ -1375,10 +1375,10 @@ def test_review_edits_update_preview_raw_results_and_exported_excel(tmp_path: Pa
     edited = TASKS["task-edit"]["_records"][0]
     assert edited.total_with_tax == "99.50"
     assert edited.document_type == "住宿发票"
-    assert edited.reimbursement_category == "住宿费"
+    assert edited.high_level_category == "住宿费"
     assert "INV-EDIT" in edited.new_name
     assert response["preview"]["review_cards"][0]["价税合计"] == 99.5
-    assert response["preview"]["summary_rows"][1] == {"报销大类": "住宿费", "计入金额合计": 99.5, "张数": 1}
+    assert response["preview"]["summary_rows"][3] == {"报销大类": "通行费", "计入金额合计": 99.5, "张数": 1}
     assert TASKS["task-edit"]["files"][0]["amount"] == "99.50"
     raw_results = json.loads((out_dir / "raw_results.json").read_text(encoding="utf-8"))
     assert raw_results[0]["total_with_tax"] == "99.50"

@@ -611,7 +611,7 @@ def get_task_records(task: Dict, package_id: str | None = None):
 EDITABLE_RECORD_FIELDS = {
     "document_date": "document_date",
     "document_type": "document_type",
-    "reimbursement_category": "reimbursement_category",
+    "reimbursement_category": "high_level_category",  # 前端表单字段 → 存储到 high_level_category
     "invoice_number": "invoice_number",
     "seller_name": "seller_name",
     "buyer_name": "buyer_name",

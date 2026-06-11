@@ -21,6 +21,21 @@ REIMBURSEMENT_CATEGORIES = [
     MEAL_ALLOWANCE_CATEGORY,
 ]
 
+HIGH_LEVEL_CATEGORY_MAP = {
+    "住宿费": "差旅费",
+    "行程交通费": "交通费",
+    "通行费": "交通费",
+    "过路费": "交通费",
+    "油费": "交通费",
+    "退改费": "交通费",
+    "市区交通费": "交通费",
+}
+
+HIGH_LEVEL_CATEGORY_KEYWORDS: list[tuple[list[str], str]] = [
+    (["餐饮", "吃饭", "餐厅", "美食", "饮品", "食品", "饭店", "娱乐", "KTV", "休闲", "咖啡"], "招待费"),
+    (["打印", "配送", "文印", "晒图", "复印", "印刷", "设备", "材料", "文具", "办公用品"], "材料费"),
+]
+
 
 def assign_reimbursement_category(record: ExpenseRecord) -> str:
     text = " ".join(
@@ -49,9 +64,23 @@ def assign_reimbursement_category(record: ExpenseRecord) -> str:
     return "其他费用"
 
 
+def compute_high_level_category(record: ExpenseRecord) -> str:
+    fine = record.reimbursement_category
+    if fine in HIGH_LEVEL_CATEGORY_MAP:
+        return HIGH_LEVEL_CATEGORY_MAP[fine]
+    text = " ".join(
+        [record.document_type, record.seller_name, record.description, record.original_name, record.raw_text]
+    )
+    for keywords, category in HIGH_LEVEL_CATEGORY_KEYWORDS:
+        if _has_any(text, keywords):
+            return category
+    return "其他"
+
+
 def assign_reimbursement_categories(records: Iterable[ExpenseRecord]) -> None:
     for record in records:
         record.reimbursement_category = assign_reimbursement_category(record)
+        record.high_level_category = compute_high_level_category(record)
 
 
 def reimbursement_summary_rows(records: Iterable[ExpenseRecord]) -> List[Tuple[str, Decimal, int]]:

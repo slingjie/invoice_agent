@@ -40,6 +40,7 @@ class ExpenseRecord:
     document_date: str = ""
     document_type: str = "其他/无法识别"
     reimbursement_category: str = ""
+    high_level_category: str = ""
     include_in_amount: bool = False
     invoice_number: str = ""
     invoice_code: str = ""
