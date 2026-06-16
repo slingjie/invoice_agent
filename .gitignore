@@ -35,6 +35,14 @@ Thumbs.db
 # WorkBuddy 内部数据
 .workbuddy/
 
+# 工具生成目录
+.agents/
+.claude/
+.codegraph/
+.codex/
+.playwright-mcp/
+.pytest_tmp/
+
 # 临时检查脚本与结果
 check_classification_v2.py
 check_result.txt
