@@ -586,11 +586,13 @@ function renderReviewCards(items) {
 
 function renderReviewReadOnly(item) {
   const summary = [
+    ['项目', item['项目名称']],
     ['金额', item['价税合计']],
     ['日期', item['凭证日期']],
     ['大类', item['报销大类']]
   ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? '')}</strong></div>`).join('');
   const coreFields = [
+    ['项目名称', item['项目名称']],
     ['凭证日期', item['凭证日期']],
     ['凭证类别', item['凭证类别']],
     ['报销大类', item['报销大类']],
@@ -619,6 +621,7 @@ function renderReviewReadOnly(item) {
 
 function renderReviewEditForm(sequence, item) {
   const coreFields = [
+    ['project_name', '项目名称', item['项目名称']],
     ['total_with_tax', '价税合计', item['价税合计']],
     ['document_date', '凭证日期', item['凭证日期']],
     ['document_type', '凭证类别', item['凭证类别']],

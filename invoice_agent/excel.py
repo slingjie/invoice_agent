@@ -49,6 +49,7 @@ MAIN_HEADERS = [
 
 COMPANY_FORM_HEADERS = [
     "序号",
+    "项目名",
     "报销大类",
     "凭证日期",
     "人员",
@@ -142,6 +143,7 @@ def write_workbook(path: Path, records: List[ExpenseRecord], trip_audit: TripAud
 def _company_form_row(record: ExpenseRecord) -> List[object]:
     return [
         record.sequence,
+        record.project_name,
         record.high_level_category,
         record.document_date,
         record.traveler,
@@ -154,7 +156,7 @@ def _company_form_row(record: ExpenseRecord) -> List[object]:
 
 def _company_form_total_row(records: List[ExpenseRecord]) -> List[object]:
     total, count = _included_total(records)
-    return ["合计", "", "", "", "", "", float(total), count]
+    return ["合计", "", "", "", "", "", "", float(total), count]
 
 
 def _main_row(record: ExpenseRecord) -> List[object]:
@@ -221,6 +223,7 @@ def build_preview(records: List[ExpenseRecord], trip_audit: TripAuditResult | No
         + [
             {
                 "序号": "合计",
+                "项目名": "",
                 "报销大类": "",
                 "凭证日期": "",
                 "人员": "",
@@ -295,6 +298,7 @@ def _trip_audit_rows(trip_audit: TripAuditResult) -> List[dict]:
 
 def _review_card(record: ExpenseRecord) -> dict:
     return {
+        "项目名称": record.project_name,
         "序号": record.sequence,
         "原文件名": record.original_name,
         "凭证日期": record.document_date,

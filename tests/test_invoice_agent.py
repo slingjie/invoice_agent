@@ -222,6 +222,7 @@ def test_build_preview_includes_review_cards_and_lightweight_overview(tmp_path: 
 
     assert preview["review_cards"] == [
         {
+            "项目名称": "项目",
             "序号": 1,
             "原文件名": "invoice.pdf",
             "凭证日期": "2026-03-01",
