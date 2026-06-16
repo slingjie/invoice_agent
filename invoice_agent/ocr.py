@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import random
 import logging
 import os
 import time
@@ -404,6 +405,20 @@ class SdkOcrProvider:
     比固定间隔轮询更高效。httpx 连接池和 asyncio.gather 并发进一步提升吞吐。
     """
 
+    _RETRY_MAX = 6
+    _RETRY_BASE_DELAY = 2.0
+    _RETRY_MAX_DELAY = 30.0
+    _MIN_SUBMIT_INTERVAL = 2.0  # seconds — caps at 0.5 req/s = 30 RPM max
+
+    @staticmethod
+    def _is_retryable(exc: Exception) -> bool:
+        from paddleocr._api_client.errors import APIError, RateLimitError
+        if isinstance(exc, RateLimitError):
+            return True
+        if isinstance(exc, APIError) and exc.status_code == 429:
+            return True
+        return False
+
     def __init__(
         self,
         access_token: Optional[str] = None,
@@ -433,6 +448,8 @@ class SdkOcrProvider:
         from paddleocr import AsyncPaddleOCRClient
 
         sem = asyncio.Semaphore(max_workers)
+        rate_lock = asyncio.Lock()
+        last_submit = 0.0
 
         async with AsyncPaddleOCRClient(
             token=self.access_token,
@@ -441,13 +458,33 @@ class SdkOcrProvider:
         ) as client:
 
             async def process_one(path: Path) -> ParsedDocument:
+                nonlocal last_submit
                 async with sem:
-                    try:
-                        result = await client.parse_document(file_path=str(path))
-                        return _sdk_result_to_parsed(path, result)
-                    except Exception as exc:
-                        logger.warning("SDK parse failed for %s: %s", path.name, exc)
-                        return _error_document(path, {"code": "SDK_ERROR", "message": str(exc)})
+                    for attempt in range(self._RETRY_MAX + 1):
+                        try:
+                            async with rate_lock:
+                                now = asyncio.get_event_loop().time()
+                                wait = self._MIN_SUBMIT_INTERVAL - (now - last_submit)
+                                if wait > 0:
+                                    await asyncio.sleep(wait)
+                                last_submit = asyncio.get_event_loop().time()
+                            result = await client.parse_document(file_path=str(path))
+                            return _sdk_result_to_parsed(path, result)
+                        except Exception as exc:
+                            if self._is_retryable(exc) and attempt < self._RETRY_MAX:
+                                delay = min(
+                                    self._RETRY_BASE_DELAY * (2 ** attempt),
+                                    self._RETRY_MAX_DELAY,
+                                )
+                                delay *= random.uniform(0.5, 1.5)
+                                logger.warning(
+                                    "SDK rate limited for %s (attempt %d/%d), retrying in %.1fs",
+                                    path.name, attempt + 1, self._RETRY_MAX, delay,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            logger.warning("SDK parse failed for %s: %s", path.name, exc)
+                            return _error_document(path, {"code": "SDK_ERROR", "message": str(exc)})
 
             tasks = [asyncio.create_task(process_one(p)) for p in paths]
             return await asyncio.gather(*tasks)
