@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -423,8 +424,6 @@ class SdkOcrProvider:
                 for path in paths
             ]
         try:
-            import asyncio
-
             return asyncio.run(self._run_async(paths, max_workers))
         except Exception as exc:
             logger.error("SdkOcrProvider failed: %s", exc)
