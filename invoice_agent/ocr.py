@@ -88,6 +88,9 @@ class PaddleOcrProvider:
 class PaddleAsyncOcrProvider:
     """异步 Job API 提供者，支持自动重试和同步 API 回退。
 
+    DEPRECATED: 请使用 SdkOcrProvider（基于官方 paddleocr SDK）。
+    保留此实现作为 fallback。
+
     重试策略：
     - HTTP 层（urllib3.Retry）：仅对 GET 请求（轮询/下载）自动重试
     - 应用层（_submit_job）：对 POST 请求（文件上传）手动重试，带指数退避
@@ -388,6 +391,80 @@ class PaddleAsyncOcrProvider:
             )
         except Exception as exc:
             return _error_document(path, {"code": "RESULT_ERROR", "message": str(exc)})
+
+
+class SdkOcrProvider:
+    """基于官方 paddleocr SDK 的异步 job API 提供者。
+
+    内部使用 asyncio.run(AsyncPaddleOCRClient) 实现真正异步并发。
+    asyncio.run() 在调用线程（后台线程）中创建新事件循环，Python 官方支持此用法。
+
+    SDK 的 AsyncPoller 使用指数退避轮询（3s → 4.5s → 6.75s → … → 15s max），
+    比固定间隔轮询更高效。httpx 连接池和 asyncio.gather 并发进一步提升吞吐。
+    """
+
+    def __init__(
+        self,
+        access_token: Optional[str] = None,
+        timeout_seconds: int = 120,
+        request_timeout_seconds: int = 60,
+    ):
+        self.access_token = (access_token or os.getenv("PADDLEOCR_ACCESS_TOKEN", "")).strip()
+        self.timeout_seconds = timeout_seconds
+        self.request_timeout_seconds = request_timeout_seconds
+
+    def parse(self, path: Path) -> ParsedDocument:
+        return self.parse_many([path], max_workers=1)[0]
+
+    def parse_many(self, paths: List[Path], max_workers: int = 3) -> List[ParsedDocument]:
+        if not self.access_token:
+            return [
+                _error_document(path, {"code": "CONFIG_ERROR", "message": "Missing PaddleOCR access token"})
+                for path in paths
+            ]
+        try:
+            import asyncio
+
+            return asyncio.run(self._run_async(paths, max_workers))
+        except Exception as exc:
+            logger.error("SdkOcrProvider failed: %s", exc)
+            return [_error_document(path, {"code": "SDK_ERROR", "message": str(exc)}) for path in paths]
+
+    async def _run_async(self, paths: List[Path], max_workers: int) -> List[ParsedDocument]:
+        from paddleocr import AsyncPaddleOCRClient
+
+        sem = asyncio.Semaphore(max_workers)
+
+        async with AsyncPaddleOCRClient(
+            token=self.access_token,
+            request_timeout=self.request_timeout_seconds,
+            poll_timeout=self.timeout_seconds,
+        ) as client:
+
+            async def process_one(path: Path) -> ParsedDocument:
+                async with sem:
+                    try:
+                        result = await client.parse_document(file_path=str(path))
+                        return _sdk_result_to_parsed(path, result)
+                    except Exception as exc:
+                        logger.warning("SDK parse failed for %s: %s", path.name, exc)
+                        return _error_document(path, {"code": "SDK_ERROR", "message": str(exc)})
+
+            tasks = [asyncio.create_task(process_one(p)) for p in paths]
+            return await asyncio.gather(*tasks)
+
+
+def _sdk_result_to_parsed(path: Path, result: Any) -> ParsedDocument:
+    """将 SDK 的 DocParsingResult 映射为我们的 ParsedDocument。"""
+    texts = [page.markdown_text for page in result.pages if page.markdown_text]
+    raw_text = "\n\n".join(texts)
+    return ParsedDocument(
+        source_path=path,
+        raw_text=raw_text,
+        raw_result={"job_id": result.job_id},
+        fields=extract_fields_from_text(raw_text, path),
+        ok=True,
+    )
 
 
 def _document_from_layout_result(path: Path, result: Dict[str, Any]) -> ParsedDocument:

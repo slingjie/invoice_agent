@@ -12,7 +12,7 @@ from invoice_agent.cli import _trip_info_from_args, build_parser
 from invoice_agent.extractor import extract_fields_from_text
 from invoice_agent.excel import build_preview, write_workbook
 from invoice_agent.models import ExpenseRecord, ParsedDocument, TripInfo
-from invoice_agent.ocr import PaddleAsyncOcrProvider
+from invoice_agent.ocr import PaddleAsyncOcrProvider, SdkOcrProvider
 from invoice_agent.pipeline import analyze_records, organize_batch_subfolders, organize_folder, resolve_trip_info
 from invoice_agent.trip_audit import TripAuditPolicy, run_trip_audit
 from invoice_agent.web import (
@@ -386,7 +386,7 @@ def test_organize_folder_generates_preview_without_copying(tmp_path: Path):
     assert "不计金额" in result.records[-1].new_name
 
     workbook = load_workbook(result.output_dir / "00_报销清单.xlsx", data_only=False)
-    assert workbook.sheetnames == ["报销清单", "类别汇总", "重复与风险", "行程校对", "重命名计划"]
+    assert workbook.sheetnames == ["报销清单", "类别汇总", "公司报销表单汇总", "重复与风险", "行程校对", "重命名计划"]
     main = workbook["报销清单"]
     main_headers = [cell.value for cell in main[1]]
     assert "发票代码" not in main_headers
@@ -717,7 +717,7 @@ def test_load_agent_config_reads_local_paddleocr_settings(tmp_path: Path):
     assert config.paddleocr_doc_parsing_api_url == "https://example.com/layout-parsing"
     assert config.paddleocr_job_url == "https://example.com/jobs"
     assert config.paddleocr_access_token == "token-from-file"
-    assert config.ocr_provider == "async_jobs"
+    assert config.ocr_provider == "async_jobs"  # 自定义配置值
     assert config.city_transport_daily_limit == "120"
     assert config.lodging_daily_limit == "450"
     assert config.llm_base_url == "https://llm.example.com/v1"
@@ -745,6 +745,29 @@ def test_async_paddle_provider_submits_all_jobs_before_polling(tmp_path: Path):
     assert len(session.submitted) == 2
     assert [doc.ok for doc in docs] == [True, True]
     assert docs[0].fields["invoice_number"] == "INVASYNC"
+
+
+def test_sdk_provider_returns_error_without_token(tmp_path: Path):
+    path = tmp_path / "invoice.pdf"
+    write_file(path, b"pdf")
+    provider = SdkOcrProvider(access_token="")
+
+    docs = provider.parse_many([path])
+
+    assert len(docs) == 1
+    assert docs[0].ok is False
+    assert docs[0].error["code"] == "CONFIG_ERROR"
+
+
+def test_sdk_provider_catches_sdk_errors_gracefully(tmp_path: Path, monkeypatch):
+    path = tmp_path / "invoice.pdf"
+    write_file(path, b"pdf")
+    provider = SdkOcrProvider(access_token="invalid-token", timeout_seconds=1)
+
+    docs = provider.parse_many([path])
+
+    assert len(docs) == 1
+    assert docs[0].ok is False
 
 
 def test_extracts_train_ticket_amount_and_travel_date():
@@ -1117,10 +1140,14 @@ def test_web_flow_previews_before_exporting_excel(tmp_path: Path, monkeypatch):
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
                 "paddleocr_model": "PaddleOCR-VL-1.6",
+                "request_timeout_seconds": 60,
+                "retry_max_attempts": 3,
+                "retry_base_delay_seconds": 1.0,
+                "fallback_api_url": "",
             },
         )(),
     )
-    monkeypatch.setattr("invoice_agent.web.PaddleAsyncOcrProvider", lambda **kwargs: FakeOcrProvider())
+    monkeypatch.setattr("invoice_agent.web.SdkOcrProvider", lambda **kwargs: FakeOcrProvider())
 
     run_organize_from_form(form, task_id=task_id)
 
@@ -1186,10 +1213,14 @@ def test_web_batch_task_snapshot_includes_package_statuses(tmp_path: Path, monke
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
                 "paddleocr_model": "PaddleOCR-VL-1.6",
+                "request_timeout_seconds": 60,
+                "retry_max_attempts": 3,
+                "retry_base_delay_seconds": 1.0,
+                "fallback_api_url": "",
             },
         )(),
     )
-    monkeypatch.setattr("invoice_agent.web.PaddleAsyncOcrProvider", lambda **kwargs: FakeOcrProvider())
+    monkeypatch.setattr("invoice_agent.web.SdkOcrProvider", lambda **kwargs: FakeOcrProvider())
 
     run_organize_from_form(form, task_id=task_id)
     snapshot = get_task_snapshot(task_id)
@@ -1248,10 +1279,14 @@ def test_web_batch_task_publishes_package_preview_before_all_packages_finish(tmp
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
                 "paddleocr_model": "PaddleOCR-VL-1.6",
+                "request_timeout_seconds": 60,
+                "retry_max_attempts": 3,
+                "retry_base_delay_seconds": 1.0,
+                "fallback_api_url": "",
             },
         )(),
     )
-    monkeypatch.setattr("invoice_agent.web.PaddleAsyncOcrProvider", lambda **kwargs: provider)
+    monkeypatch.setattr("invoice_agent.web.SdkOcrProvider", lambda **kwargs: provider)
 
     thread = threading.Thread(target=run_organize_from_form, args=(form,), kwargs={"task_id": task_id})
     thread.start()
@@ -1471,10 +1506,14 @@ def test_web_review_progress_rows_include_final_risk_messages(tmp_path: Path, mo
                 "paddleocr_job_url": "https://example.com/jobs",
                 "paddleocr_access_token": "",
                 "paddleocr_model": "PaddleOCR-VL-1.6",
+                "request_timeout_seconds": 60,
+                "retry_max_attempts": 3,
+                "retry_base_delay_seconds": 1.0,
+                "fallback_api_url": "",
             },
         )(),
     )
-    monkeypatch.setattr("invoice_agent.web.PaddleAsyncOcrProvider", lambda **kwargs: FakeOcrProvider())
+    monkeypatch.setattr("invoice_agent.web.SdkOcrProvider", lambda **kwargs: FakeOcrProvider())
 
     run_organize_from_form(form, task_id=task_id)
 

@@ -12,7 +12,7 @@ class AgentConfig:
     paddleocr_job_url: str = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
     paddleocr_access_token: str = ""
     paddleocr_model: str = "PaddleOCR-VL-1.6"
-    ocr_provider: str = "async_jobs"
+    ocr_provider: str = "sdk"
     city_transport_daily_limit: str = "100"
     lodging_daily_limit: str = ""
     llm_base_url: str = ""
@@ -48,7 +48,7 @@ def load_agent_config(path: Optional[Path]) -> AgentConfig:
         paddleocr_model=str(
             data.get("paddleocr_model") or data.get("PADDLEOCR_MODEL") or "PaddleOCR-VL-1.6"
         ).strip(),
-        ocr_provider=str(data.get("ocr_provider") or data.get("OCR_PROVIDER") or "async_jobs").strip(),
+        ocr_provider=str(data.get("ocr_provider") or data.get("OCR_PROVIDER") or "sdk").strip(),
         city_transport_daily_limit=str(
             data.get("city_transport_daily_limit") or data.get("CITY_TRANSPORT_DAILY_LIMIT") or "100"
         ).strip(),

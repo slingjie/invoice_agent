@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import load_agent_config
 from .excel import build_preview
 from .models import TripInfo
-from .ocr import PaddleAsyncOcrProvider
+from .ocr import SdkOcrProvider
 from .pipeline import (
     ORGANIZE_MODE_BATCH_SUBFOLDERS,
     ORGANIZE_MODE_SINGLE,
@@ -750,15 +750,10 @@ def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
     timeout_seconds = parse_positive_int(form.get("timeout_seconds"), 120)
     _log.info("Creating OCR provider: job_url=%s, timeout=%ds, request_timeout=%ds",
               config.paddleocr_job_url[:50], timeout_seconds, config.request_timeout_seconds)
-    provider = PaddleAsyncOcrProvider(
-        job_url=config.paddleocr_job_url,
+    provider = SdkOcrProvider(
         access_token=config.paddleocr_access_token or None,
-        model=config.paddleocr_model,
         timeout_seconds=timeout_seconds,
         request_timeout_seconds=config.request_timeout_seconds,
-        retry_max_attempts=config.retry_max_attempts,
-        retry_base_delay_seconds=config.retry_base_delay_seconds,
-        fallback_api_url=config.fallback_api_url or None,
     )
     _log.info("Provider created, starting OCR for folder=%s mode=%s", folder, organize_mode)
     trip_info = TripInfo(

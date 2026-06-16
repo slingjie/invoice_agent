@@ -7,7 +7,7 @@ from typing import Optional
 
 from .config import load_agent_config
 from .models import TripInfo
-from .ocr import PaddleAsyncOcrProvider
+from .ocr import SdkOcrProvider
 from .pipeline import ORGANIZE_MODE_BATCH_SUBFOLDERS, ORGANIZE_MODE_SINGLE, organize_batch_subfolders, organize_folder
 from .trip_audit import TripAuditPolicy
 from .web import run_ui
@@ -114,15 +114,10 @@ def build_ocr_provider(config, provider_name: Optional[str], timeout_seconds: in
                        retry_max_attempts: Optional[int] = None,
                        retry_base_delay_seconds: Optional[float] = None,
                        request_timeout_seconds: Optional[int] = None):
-    return PaddleAsyncOcrProvider(
-        job_url=config.paddleocr_job_url,
+    return SdkOcrProvider(
         access_token=config.paddleocr_access_token or None,
-        model=config.paddleocr_model,
         timeout_seconds=timeout_seconds,
         request_timeout_seconds=request_timeout_seconds if request_timeout_seconds is not None else config.request_timeout_seconds,
-        retry_max_attempts=retry_max_attempts if retry_max_attempts is not None else config.retry_max_attempts,
-        retry_base_delay_seconds=retry_base_delay_seconds if retry_base_delay_seconds is not None else config.retry_base_delay_seconds,
-        fallback_api_url=config.fallback_api_url or None,
     )
 
 
