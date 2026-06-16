@@ -39,3 +39,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: 修复 PaddleOCR SDK 429 限流问题
+
+**Date**: 2026-06-16
+**Task**: 修复 PaddleOCR SDK 429 限流问题
+**Branch**: `main`
+
+### Summary
+
+SdkOcrProvider 新增全局速率限制（2s 间隔）、429 指数退避重试（6 轮 2s→30s，±50% jitter）、_is_retryable 同时识别 RateLimitError 和 APIError(429)。端到端验证 18 张发票 100% 识别零 429，耗时 18s。更新 OCR spec 文档。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ff2522b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
