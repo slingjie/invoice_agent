@@ -426,8 +426,16 @@ def _fill_travel_sheets(workbook, data: CompanyReimbursementData) -> None:
             sheet["L9"] = float(data.refund_total)
             sheet["J18"] = float(data.meal_allowance.amount)
             sheet["L18"] = float(data.lodging_total + data.toll_total + data.fuel_total + data.refund_total)
-            sheet["K19"] = float(data.total)
-            sheet["C19"] = amount_to_chinese_upper(data.total)
+            sheet_total = (
+                page_total
+                + data.meal_allowance.amount
+                + data.lodging_total
+                + data.toll_total
+                + data.fuel_total
+                + data.refund_total
+            )
+            sheet["K19"] = float(sheet_total)
+            sheet["C19"] = amount_to_chinese_upper(sheet_total)
         else:
             sheet["J18"] = 0
             sheet["L18"] = 0

@@ -668,6 +668,36 @@ def test_company_workbook_paginates_daily_and_travel_rows(tmp_path: Path):
     assert workbook["差旅费报销单 (2)"]["B6"].value == "2026-03-01"
 
 
+def test_travel_sheet_total_excludes_daily_expenses(tmp_path: Path):
+    train = make_record(tmp_path, "travel-total-train.pdf", "高铁发票", "232.00")
+    hotel = make_record(
+        tmp_path,
+        "travel-total-hotel.pdf",
+        "住宿发票",
+        "800.00",
+        seller_name="测试酒店",
+        daily_meal_allowance="50",
+    )
+    material = make_record(
+        tmp_path,
+        "travel-total-material.pdf",
+        "普票",
+        "300.00",
+        description="购买项目材料",
+    )
+    records = [train, hotel, material]
+    analyze_records(records)
+    data = build_company_reimbursement_data(records, export_date=date(2026, 6, 22))
+
+    output = tmp_path / "travel-total.xlsx"
+    write_company_workbook(output, data)
+    sheet = load_workbook(output, data_only=False)["差旅费报销单"]
+
+    assert data.total == Decimal("1432.00")
+    assert sheet["K19"].value == 1132.0
+    assert sheet["C19"].value == "人民币壹仟壹佰叁拾贰元整"
+
+
 def test_pdf_export_skips_when_excel_unavailable(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(pdf_export, "find_excel_executable", lambda: None)
 
