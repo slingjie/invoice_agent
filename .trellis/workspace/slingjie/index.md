@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 2
-- **Last Active**: 2026-06-16
+- **Total Sessions**: 3
+- **Last Active**: 2026-06-22
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~74 | Active |
+| `journal-1.md` | ~109 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 3 | 2026-06-22 | 完成公司格式报销单同步导出 | `8afc926`, `1946f94`, `d8e93c9`, `9fe83ba` | `-` |
 | 2 | 2026-06-16 | 修复 PaddleOCR SDK 429 限流问题 | `ff2522b` | `main` |
 | 1 | 2026-06-16 | OCR性能优化：端到端验证与收尾 | `c815943`, `b14cfe4` | `main` |
 <!-- @@@/auto:session-history -->
