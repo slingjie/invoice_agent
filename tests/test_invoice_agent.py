@@ -1177,14 +1177,16 @@ def test_ui_page_contains_required_form_fields():
     js = Path("invoice_agent/static/app.js").read_text(encoding="utf-8")
 
     for field in [
-        '<link rel="stylesheet" href="/static/app.css?v=review-edit-v3">',
-        '<script src="/static/app.js?v=review-edit-v3" defer></script>',
+        '<link rel="stylesheet" href="/static/app.css?v=config-collapse-v1">',
+        '<script src="/static/app.js?v=config-collapse-v1" defer></script>',
         'data-initial-task-id=""',
         'data-task-state="idle"',
         'class="app-shell"',
         'class="app-topbar"',
         'class="layout-shell"',
         'class="workspace-grid"',
+        'id="config-panel-toggle"',
+        'aria-expanded="true"',
         'class="workflow-stepper"',
         'data-flow-step="upload"',
         'data-flow-step="ocr"',
@@ -1269,6 +1271,8 @@ def test_ui_page_contains_required_form_fields():
         "saveReviewEdits",
         "review-card",
         "/previews/",
+        "toggleConfigPanel",
+        "is-config-collapsed",
     ]:
         assert field in js
 
@@ -1298,6 +1302,7 @@ def test_ui_page_contains_required_form_fields():
         ".review-edit-form",
         ".review-save-button",
         ".preview-lightbox",
+        ".workspace-grid.is-config-collapsed",
         "word-break: keep-all",
         "min-width: 1760px",
         "@media (max-width: 860px)",

@@ -231,6 +231,26 @@ h3 {
   align-items: start;
 }
 
+.config-section-head {
+  align-items: center;
+}
+
+.config-section-head-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.config-panel-toggle {
+  display: inline-grid;
+  flex: 0 0 36px;
+  width: 36px;
+  min-height: 36px;
+  place-items: center;
+  padding: 0;
+  font-size: 24px;
+  line-height: 1;
+}
+
 .config-panel {
   position: sticky;
   top: 88px;
@@ -1645,6 +1665,35 @@ code {
   }
 }
 
+@media (min-width: 861px) {
+  .workspace-grid.is-config-collapsed {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .workspace-grid.is-config-collapsed .config-panel .task-card {
+    box-shadow: none;
+  }
+
+  .workspace-grid.is-config-collapsed .config-panel .form-section:first-child {
+    border-bottom: 0;
+    padding: 9px;
+  }
+
+  .workspace-grid.is-config-collapsed .config-section-head {
+    justify-content: center;
+    margin-bottom: 0;
+  }
+
+  .workspace-grid.is-config-collapsed .config-section-head .section-index,
+  .workspace-grid.is-config-collapsed .config-section-head-copy,
+  .workspace-grid.is-config-collapsed .config-panel .field-stack,
+  .workspace-grid.is-config-collapsed .config-panel .advanced-section,
+  .workspace-grid.is-config-collapsed .config-panel .form-footer,
+  .workspace-grid.is-config-collapsed .config-panel .hint {
+    display: none;
+  }
+}
+
 @media (max-width: 860px) {
   .app-topbar,
   .layout-shell {
@@ -1682,6 +1731,10 @@ code {
 
   .config-panel {
     position: static;
+  }
+
+  .config-panel-toggle {
+    display: none;
   }
 
   .workflow-stepper {
