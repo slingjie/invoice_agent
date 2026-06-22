@@ -18,6 +18,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .extractor import extract_fields_from_text
+from .cancellation import CancellationControl
 from .models import ParsedDocument
 
 logger = logging.getLogger(__name__)
@@ -429,22 +430,39 @@ class SdkOcrProvider:
         self.timeout_seconds = timeout_seconds
         self.request_timeout_seconds = request_timeout_seconds
 
-    def parse(self, path: Path) -> ParsedDocument:
-        return self.parse_many([path], max_workers=1)[0]
+    def parse(
+        self,
+        path: Path,
+        cancellation: Optional[CancellationControl] = None,
+    ) -> ParsedDocument:
+        documents = self.parse_many([path], max_workers=1, cancellation=cancellation)
+        if documents:
+            return documents[0]
+        return _error_document(path, {"code": "CANCELLED", "message": "OCR task cancelled"})
 
-    def parse_many(self, paths: List[Path], max_workers: int = 3) -> List[ParsedDocument]:
+    def parse_many(
+        self,
+        paths: List[Path],
+        max_workers: int = 3,
+        cancellation: Optional[CancellationControl] = None,
+    ) -> List[ParsedDocument]:
         if not self.access_token:
             return [
                 _error_document(path, {"code": "CONFIG_ERROR", "message": "Missing PaddleOCR access token"})
                 for path in paths
             ]
         try:
-            return asyncio.run(self._run_async(paths, max_workers))
+            return asyncio.run(self._run_async(paths, max_workers, cancellation))
         except Exception as exc:
             logger.error("SdkOcrProvider failed: %s", exc)
             return [_error_document(path, {"code": "SDK_ERROR", "message": str(exc)}) for path in paths]
 
-    async def _run_async(self, paths: List[Path], max_workers: int) -> List[ParsedDocument]:
+    async def _run_async(
+        self,
+        paths: List[Path],
+        max_workers: int,
+        cancellation: Optional[CancellationControl] = None,
+    ) -> List[ParsedDocument]:
         from paddleocr import AsyncPaddleOCRClient
 
         sem = asyncio.Semaphore(max_workers)
@@ -486,8 +504,50 @@ class SdkOcrProvider:
                             logger.warning("SDK parse failed for %s: %s", path.name, exc)
                             return _error_document(path, {"code": "SDK_ERROR", "message": str(exc)})
 
-            tasks = [asyncio.create_task(process_one(p)) for p in paths]
-            return await asyncio.gather(*tasks)
+            results: Dict[Path, ParsedDocument] = {}
+            path_iter = iter(paths)
+            tasks: Dict[asyncio.Task, Path] = {}
+
+            def start_next() -> bool:
+                if cancellation and cancellation.should_stop_starting():
+                    return False
+                try:
+                    path = next(path_iter)
+                except StopIteration:
+                    return False
+                tasks[asyncio.create_task(process_one(path))] = path
+                return True
+
+            for _ in range(max(1, max_workers)):
+                if not start_next():
+                    break
+
+            while tasks:
+                done, _ = await asyncio.wait(
+                    tasks,
+                    timeout=0.1,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    path = tasks.pop(task)
+                    try:
+                        results[path] = task.result()
+                    except asyncio.CancelledError:
+                        pass
+
+                if cancellation and cancellation.should_terminate():
+                    pending = list(tasks)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    tasks.clear()
+                    break
+
+                while len(tasks) < max(1, max_workers) and start_next():
+                    pass
+
+            return [results[path] for path in paths if path in results]
 
 
 def _sdk_result_to_parsed(path: Path, result: Any) -> ParsedDocument:

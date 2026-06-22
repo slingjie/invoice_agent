@@ -1,12 +1,15 @@
 import json
+import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
 
 import invoice_agent.web as web
+from invoice_agent.cancellation import CancellationControl
 from invoice_agent.config import load_agent_config
 from invoice_agent.cli import _trip_info_from_args, build_parser
 from invoice_agent.extractor import extract_fields_from_text
@@ -23,9 +26,30 @@ from invoice_agent.web import (
     get_task_snapshot,
     handle_choose_path,
     render_index,
+    request_task_stop,
+    request_task_terminate,
     run_organize_from_form,
     update_task_record,
 )
+
+
+def test_cancellation_control_stop_can_upgrade_to_terminate():
+    control = CancellationControl()
+
+    assert control.mode == "none"
+
+    control.request_stop()
+
+    assert control.mode == "stop"
+    assert control.should_stop_starting()
+    assert not control.should_terminate()
+
+    control.request_terminate()
+    control.request_stop()
+
+    assert control.mode == "terminate"
+    assert control.should_stop_starting()
+    assert control.should_terminate()
 
 
 class FakeOcrProvider:
@@ -94,9 +118,35 @@ class BlockingSecondPackageProvider(FakeOcrProvider):
         self.release_second = threading.Event()
 
     def parse(self, path: Path) -> ParsedDocument:
-        if "/B/" in str(path):
+        if path.parent.name == "B":
             self.started_second.set()
             self.release_second.wait(timeout=2)
+        return super().parse(path)
+
+
+class BlockingRecordingProvider(FakeOcrProvider):
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def parse(self, path: Path, cancellation=None) -> ParsedDocument:
+        with self.lock:
+            self.calls.append(path.name)
+        self.started.set()
+        self.release.wait(timeout=2)
+        return super().parse(path)
+
+
+class TerminatingProvider(FakeOcrProvider):
+    def __init__(self):
+        self.started = threading.Event()
+
+    def parse(self, path: Path, cancellation=None) -> ParsedDocument:
+        self.started.set()
+        while not cancellation.should_terminate():
+            time.sleep(0.01)
         return super().parse(path)
 
 
@@ -112,6 +162,263 @@ class FakeResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise RuntimeError(self.text)
+
+
+def test_organize_folder_stop_finishes_active_file_without_starting_more(tmp_path: Path):
+    folder = tmp_path / "trip"
+    folder.mkdir()
+    for index in range(3):
+        (folder / f"invoice-{index}.png").write_bytes(b"image")
+    provider = BlockingRecordingProvider()
+    cancellation = CancellationControl()
+    result_box = {}
+
+    thread = threading.Thread(
+        target=lambda: result_box.setdefault(
+            "result",
+            organize_folder(
+                folder,
+                trip_info=TripInfo("测试出差", "张三", "技术部", "2026-03-01", "2026-03-03"),
+                out_dir=tmp_path / "out",
+                ocr_provider=provider,
+                max_workers=1,
+                write_excel=False,
+                cancellation=cancellation,
+            ),
+        )
+    )
+    thread.start()
+    assert provider.started.wait(timeout=1)
+
+    cancellation.request_stop()
+    provider.release.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert provider.calls == ["invoice-0.png"]
+    assert len(result_box["result"].records) == 1
+    assert result_box["result"].cancellation_mode == "stop"
+
+
+def test_sdk_ocr_provider_terminate_cancels_pending_tasks(tmp_path: Path, monkeypatch):
+    started = threading.Event()
+
+    class BlockingAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def parse_document(self, file_path):
+            import asyncio
+
+            started.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr",
+        types.SimpleNamespace(AsyncPaddleOCRClient=BlockingAsyncClient),
+    )
+    paths = []
+    for index in range(2):
+        path = tmp_path / f"invoice-{index}.png"
+        path.write_bytes(b"image")
+        paths.append(path)
+    provider = SdkOcrProvider(access_token="token")
+    cancellation = CancellationControl()
+    result_box = {}
+
+    thread = threading.Thread(
+        target=lambda: result_box.setdefault(
+            "documents",
+            provider.parse_many(paths, max_workers=2, cancellation=cancellation),
+        )
+    )
+    thread.start()
+    assert started.wait(timeout=1)
+
+    cancellation.request_terminate()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert result_box["documents"] == []
+
+
+def test_organize_folder_terminate_discards_result_returned_after_request(tmp_path: Path):
+    folder = tmp_path / "trip"
+    write_file(folder / "invoice.png", b"image")
+    provider = TerminatingProvider()
+    cancellation = CancellationControl()
+    result_box = {}
+
+    thread = threading.Thread(
+        target=lambda: result_box.setdefault(
+            "result",
+            organize_folder(
+                folder,
+                trip_info=TripInfo("测试出差", "张三", "技术部", "2026-03-01", "2026-03-03"),
+                out_dir=tmp_path / "out",
+                ocr_provider=provider,
+                max_workers=1,
+                write_excel=False,
+                cancellation=cancellation,
+            ),
+        )
+    )
+    thread.start()
+    assert provider.started.wait(timeout=1)
+
+    cancellation.request_terminate()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert result_box["result"].records == []
+    assert result_box["result"].cancellation_mode == "terminate"
+
+
+def test_batch_mode_stop_does_not_start_next_package(tmp_path: Path):
+    root = tmp_path / "batch"
+    write_file(root / "A" / "invoice.png", b"a")
+    write_file(root / "B" / "invoice.png", b"b")
+    provider = BlockingRecordingProvider()
+    cancellation = CancellationControl()
+    result_box = {}
+
+    thread = threading.Thread(
+        target=lambda: result_box.setdefault(
+            "result",
+            organize_batch_subfolders(
+                root,
+                trip_info=TripInfo("批量出差", "张三", "技术部", "2026-03-01", "2026-03-03"),
+                out_dir=tmp_path / "out",
+                ocr_provider=provider,
+                max_workers=1,
+                write_excel=False,
+                cancellation=cancellation,
+            ),
+        )
+    )
+    thread.start()
+    assert provider.started.wait(timeout=1)
+
+    cancellation.request_stop()
+    provider.release.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert provider.calls == ["invoice.png"]
+    assert [item.state for item in result_box["result"].items] == ["stopped", "stopped"]
+
+
+def test_task_stop_can_upgrade_to_terminate_and_cancelled_task_cannot_export():
+    task_id = "task-cancel"
+    TASKS[task_id] = {
+        "id": task_id,
+        "mode": "single",
+        "state": "running",
+        "stage": "识别中",
+        "can_export": False,
+        "_cancellation": CancellationControl(),
+    }
+
+    stopped = request_task_stop(task_id)
+    terminated = request_task_terminate(task_id)
+
+    assert stopped["state"] == "stopping"
+    assert terminated["state"] == "terminating"
+    assert TASKS[task_id]["_cancellation"].mode == "terminate"
+    with pytest.raises(ValueError, match="Task is not ready for export"):
+        export_task(task_id)
+
+
+def test_web_ui_contains_recognition_cancel_controls():
+    page = render_index()
+    script = (Path(web.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="stop-task-button"' in page
+    assert 'id="terminate-task-button"' in page
+    assert "停止识别" in page
+    assert "终止任务" in page
+    assert "/stop" in script
+    assert "/terminate" in script
+    assert "window.confirm" in script
+    for state in ["stopping", "stopped", "terminating", "terminated"]:
+        assert state in script
+
+
+def test_web_task_stop_reaches_stopped_state_and_disables_export(tmp_path: Path, monkeypatch):
+    src = tmp_path / "trip"
+    write_file(src / "invoice-0.png", b"0")
+    write_file(src / "invoice-1.png", b"1")
+    task_id = "task-stop-gray"
+    TASKS[task_id] = {
+        "id": task_id,
+        "mode": "single",
+        "state": "queued",
+        "stage": "排队中",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "total": 0,
+        "completed": 0,
+        "files": [],
+        "preview": {},
+        "can_export": False,
+        "output_dir": "",
+        "excel_path": "",
+        "error": "",
+        "_cancellation": CancellationControl(),
+    }
+    provider = BlockingRecordingProvider()
+    monkeypatch.setattr(
+        "invoice_agent.web.load_agent_config",
+        lambda path: type(
+            "Config",
+            (),
+            {
+                "paddleocr_job_url": "https://example.com/jobs",
+                "paddleocr_access_token": "token",
+                "request_timeout_seconds": 60,
+                "retry_max_attempts": 3,
+                "retry_base_delay_seconds": 1.0,
+                "fallback_api_url": "",
+                "city_transport_daily_limit": "100",
+                "lodging_daily_limit": "",
+                "llm_base_url": "",
+                "llm_model": "",
+                "llm_api_key_env": "",
+            },
+        )(),
+    )
+    monkeypatch.setattr("invoice_agent.web.SdkOcrProvider", lambda **kwargs: provider)
+    form = {
+        "folder": str(src),
+        "out_dir": str(tmp_path / "out"),
+        "traveler": "张三",
+        "department": "技术部",
+        "trip_start_date": "2026-03-01",
+        "trip_end_date": "2026-03-02",
+        "max_workers": "1",
+        "timeout_seconds": "120",
+    }
+
+    thread = threading.Thread(target=run_organize_from_form, args=(form,), kwargs={"task_id": task_id})
+    thread.start()
+    assert provider.started.wait(timeout=1)
+
+    request_task_stop(task_id)
+    provider.release.set()
+    thread.join(timeout=2)
+
+    snapshot = get_task_snapshot(task_id)
+    assert not thread.is_alive()
+    assert snapshot["state"] == "stopped"
+    assert snapshot["can_export"] is False
+    assert [row["status"] for row in snapshot["files"]] == ["已识别", "已停止"]
 
 
 class FakeAsyncSession:
@@ -977,8 +1284,8 @@ def test_ui_page_contains_required_form_fields():
     js = Path("invoice_agent/static/app.js").read_text(encoding="utf-8")
 
     for field in [
-        '<link rel="stylesheet" href="/static/app.css?v=config-collapse-v1">',
-        '<script src="/static/app.js?v=config-collapse-v1" defer></script>',
+        '<link rel="stylesheet" href="/static/app.css?v=task-cancellation-v1">',
+        '<script src="/static/app.js?v=task-cancellation-v1" defer></script>',
         'data-initial-task-id=""',
         'data-task-state="idle"',
         'class="app-shell"',
