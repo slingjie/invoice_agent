@@ -105,6 +105,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         print(f"识别文件数: {len(result.records)}")
         print(f"Excel: {result.output_dir / '00_报销清单.xlsx'}")
+        print(f"公司报销单: {result.output_dir / '01_公司报销单.xlsx'}")
+        company_pdf = result.output_dir / "01_公司报销单.pdf"
+        if company_pdf.exists():
+            print(f"打印 PDF: {company_pdf}")
     if not args.apply:
         print("当前为预览模式，未复制或重命名原文件。确认清单后可追加 --apply。")
     return 0

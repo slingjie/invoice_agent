@@ -98,3 +98,39 @@ class BatchOrganizeResult:
     root_folder: Path
     output_dir: Path
     items: List[BatchOrganizeItem]
+
+
+@dataclass
+class ExportArtifact:
+    kind: str
+    path: Path
+    status: str
+    message: str = ""
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "path": str(self.path),
+            "status": self.status,
+            "message": self.message,
+        }
+
+
+@dataclass
+class ExportResult:
+    status: str
+    artifacts: List[ExportArtifact] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    def artifact_path(self, kind: str) -> str:
+        for artifact in self.artifacts:
+            if artifact.kind == kind and artifact.status == "success":
+                return str(artifact.path)
+        return ""
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "artifacts": [artifact.to_json() for artifact in self.artifacts],
+            "warnings": list(self.warnings),
+        }

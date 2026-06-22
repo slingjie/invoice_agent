@@ -1,19 +1,28 @@
 import json
 import threading
 import time
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
 
 import invoice_agent.web as web
+import invoice_agent.pdf_export as pdf_export
 from invoice_agent.config import load_agent_config
 from invoice_agent.cli import _trip_info_from_args, build_parser
+from invoice_agent.company_reimbursement import (
+    amount_to_chinese_upper,
+    build_company_reimbursement_data,
+    company_template_path,
+    write_company_workbook,
+)
 from invoice_agent.extractor import extract_fields_from_text
 from invoice_agent.excel import build_preview, write_workbook
 from invoice_agent.models import ExpenseRecord, ParsedDocument, TripInfo
 from invoice_agent.ocr import PaddleAsyncOcrProvider, SdkOcrProvider
-from invoice_agent.pipeline import analyze_records, organize_batch_subfolders, organize_folder, resolve_trip_info
+from invoice_agent.pipeline import analyze_records, export_records, organize_batch_subfolders, organize_folder, resolve_trip_info
 from invoice_agent.trip_audit import TripAuditPolicy, run_trip_audit
 from invoice_agent.web import (
     TASKS,
@@ -553,6 +562,167 @@ def test_category_summary_uses_fixed_reimbursement_categories(tmp_path: Path):
     assert preview_rows["合计总金额"] == (780.0, 7)
 
 
+def test_chinese_currency_uppercase():
+    assert amount_to_chinese_upper(Decimal("6157.11")) == "人民币陆仟壹佰伍拾柒元壹角壹分"
+    assert amount_to_chinese_upper(Decimal("100.00")) == "人民币壹佰元整"
+    assert amount_to_chinese_upper(Decimal("0.05")) == "人民币伍分"
+
+
+def test_build_company_data_filters_itineraries_and_maps_categories(tmp_path: Path):
+    train = make_record(tmp_path, "train.pdf", "高铁发票", "232.00", seller_name="铁路电子客票", description="杭州东-蚌埠南")
+    train.origin = "杭州东"
+    train.destination = "蚌埠南"
+    ride = make_record(tmp_path, "ride.pdf", "网约车发票", "88.00", seller_name="滴滴出行科技有限公司", description="酒店-项目现场")
+    hotel = make_record(
+        tmp_path,
+        "hotel.pdf",
+        "住宿发票",
+        "2380.00",
+        seller_name="维纳民宿酒店",
+        daily_meal_allowance="50",
+    )
+    material = make_record(
+        tmp_path,
+        "material.pdf",
+        "普票",
+        "233.00",
+        seller_name="顺安消防器材经营部",
+        description="购买灭火器材料",
+    )
+    itinerary = make_record(tmp_path, "trip.pdf", "行程单", "88.00", description="酒店-项目现场")
+    itinerary.include_in_amount = False
+    records = [train, ride, hotel, material, itinerary]
+    analyze_records(records)
+
+    data = build_company_reimbursement_data(records, export_date=date(2026, 6, 22))
+
+    assert [row.kind for row in data.travel_rows] == ["intercity", "city"]
+    assert data.lodging_total == Decimal("2380.00")
+    assert data.daily_rows[0].content == "购买灭火器材料"
+    assert data.meal_allowance.amount == Decimal("100.00")
+    assert data.meal_allowance.count == 0
+    assert data.total == Decimal("3033.00")
+
+
+def test_company_template_has_clean_required_sheets():
+    workbook = load_workbook(company_template_path(), data_only=False)
+
+    assert workbook.sheetnames == ["报销明细表", "差旅费报销单", "日常费用报销单"]
+    assert str(workbook["报销明细表"].page_setup.paperSize) == "9"
+    assert workbook["报销明细表"].page_setup.orientation == "portrait"
+    assert str(workbook["差旅费报销单"].page_setup.paperSize) == "11"
+    assert workbook["差旅费报销单"].page_setup.orientation == "landscape"
+    assert str(workbook["日常费用报销单"].page_setup.paperSize) == "11"
+    assert workbook["日常费用报销单"].page_setup.orientation == "landscape"
+    assert workbook["报销明细表"]["B2"].value in {None, ""}
+    assert workbook["差旅费报销单"]["E3"].value in {None, ""}
+    assert workbook["日常费用报销单"]["F3"].value in {None, ""}
+
+
+def test_company_workbook_omits_empty_daily_sheet(tmp_path: Path):
+    train = make_record(tmp_path, "train-only.pdf", "高铁发票", "232.00", description="杭州东-蚌埠南")
+    analyze_records([train])
+    data = build_company_reimbursement_data([train], export_date=date(2026, 6, 22))
+
+    output = tmp_path / "company.xlsx"
+    write_company_workbook(output, data)
+    workbook = load_workbook(output, data_only=False)
+
+    assert workbook.sheetnames == ["报销明细表", "差旅费报销单"]
+    assert workbook["报销明细表"]["B2"].value == "项目"
+    assert workbook["差旅费报销单"]["E3"].value == "张三"
+    detail_labels = [workbook["报销明细表"].cell(row, 1).value for row in range(1, workbook["报销明细表"].max_row + 1)]
+    assert detail_labels.count("总计") == 1
+    assert detail_labels.count("报销人：") == 1
+
+
+def test_company_workbook_paginates_daily_and_travel_rows(tmp_path: Path):
+    daily_records = [
+        make_record(tmp_path, f"material-{index}.pdf", "普票", "10.00", description=f"材料 {index}")
+        for index in range(9)
+    ]
+    travel_records = [
+        make_record(tmp_path, f"train-{index}.pdf", "高铁发票", "20.00", description=f"行程 {index}")
+        for index in range(13)
+    ]
+    for record in travel_records:
+        record.origin = "杭州"
+        record.destination = "上海"
+    records = daily_records + travel_records
+    analyze_records(records)
+    data = build_company_reimbursement_data(records, export_date=date(2026, 6, 22))
+
+    output = tmp_path / "company-pages.xlsx"
+    write_company_workbook(output, data)
+    workbook = load_workbook(output, data_only=False)
+
+    assert [name for name in workbook.sheetnames if name.startswith("日常费用报销单")] == [
+        "日常费用报销单",
+        "日常费用报销单 (2)",
+    ]
+    assert [name for name in workbook.sheetnames if name.startswith("差旅费报销单")] == [
+        "差旅费报销单",
+        "差旅费报销单 (2)",
+    ]
+    assert workbook["日常费用报销单 (2)"]["B5"].value == "材料 8"
+    assert workbook["差旅费报销单 (2)"]["B6"].value == "2026-03-01"
+
+
+def test_pdf_export_skips_when_excel_unavailable(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(pdf_export, "find_excel_executable", lambda: None)
+
+    result = pdf_export.export_company_pdf(tmp_path / "company.xlsx", tmp_path / "company.pdf")
+
+    assert result.status == "skipped"
+    assert "Microsoft Excel" in result.message
+
+
+def test_pdf_export_reports_subprocess_failure(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(pdf_export, "find_excel_executable", lambda: Path("EXCEL.EXE"))
+    monkeypatch.setattr(
+        pdf_export.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 1, "stdout": "", "stderr": "COM failed"})(),
+    )
+
+    result = pdf_export.export_company_pdf(tmp_path / "company.xlsx", tmp_path / "company.pdf")
+
+    assert result.status == "failed"
+    assert "COM failed" in result.message
+
+
+def test_export_records_generates_company_excel_and_preserves_summary(tmp_path: Path, monkeypatch):
+    record = make_record(tmp_path, "invoice-export.pdf", "网约车发票", "88.00", seller_name="滴滴出行科技有限公司")
+    analyze_records([record])
+    monkeypatch.setattr(
+        "invoice_agent.pipeline.export_company_pdf",
+        lambda source, target: pdf_export.PdfExportResult("skipped", target, "test skip"),
+    )
+
+    result = export_records(tmp_path / "out", [record], write_excel=True)
+
+    assert (tmp_path / "out" / "00_报销清单.xlsx").exists()
+    assert (tmp_path / "out" / "01_公司报销单.xlsx").exists()
+    assert result.status == "success"
+    assert {artifact.kind for artifact in result.artifacts} == {"summary_excel", "company_excel", "company_pdf"}
+
+
+def test_export_records_keeps_summary_when_company_export_fails(tmp_path: Path, monkeypatch):
+    record = make_record(tmp_path, "invoice-fail.pdf", "网约车发票", "88.00")
+    analyze_records([record])
+    monkeypatch.setattr(
+        "invoice_agent.pipeline.write_company_workbook",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("template broken")),
+    )
+
+    result = export_records(tmp_path / "out", [record], write_excel=True)
+
+    assert (tmp_path / "out" / "00_报销清单.xlsx").exists()
+    assert not (tmp_path / "out" / "01_公司报销单.xlsx").exists()
+    assert result.status == "partial_success"
+    assert "template broken" in result.warnings[0]
+
+
 def test_workbook_and_preview_include_trip_audit_rows(tmp_path: Path):
     outbound = make_record(tmp_path, "train-out.pdf", "高铁发票", "130.00", trip_start_date="2026-03-01", trip_end_date="2026-03-03")
     outbound.sequence = 1
@@ -1058,6 +1228,9 @@ def test_ui_page_contains_required_form_fields():
         "preview-table main-preview-table",
         "preview-table rename-preview-table",
         "renderReviewCards",
+        "partial_success",
+        "company_excel_path",
+        "company_pdf_path",
         "renderBatchPackages",
         "/export-all",
         "/packages/",
@@ -1167,7 +1340,10 @@ def test_web_flow_previews_before_exporting_excel(tmp_path: Path, monkeypatch):
     export_result = export_task(task_id)
 
     assert export_result["excel_path"] == str(out_dir / "00_报销清单.xlsx")
+    assert export_result["company_excel_path"] == str(out_dir / "01_公司报销单.xlsx")
+    assert "export_artifacts" in export_result
     assert (out_dir / "00_报销清单.xlsx").exists()
+    assert (out_dir / "01_公司报销单.xlsx").exists()
     workbook = load_workbook(out_dir / "00_报销清单.xlsx", data_only=True)
     assert "行程校对" in workbook.sheetnames
     assert TASKS[task_id]["state"] == "done"
@@ -1334,6 +1510,7 @@ def test_export_single_batch_package_writes_only_that_package(tmp_path: Path):
     result = export_batch_package("task-batch-export-one", "pkg-a")
 
     assert result["excel_path"] == str(tmp_path / "out" / "A" / "00_报销清单.xlsx")
+    assert result["company_excel_path"] == str(tmp_path / "out" / "A" / "01_公司报销单.xlsx")
     assert (tmp_path / "out" / "A" / "00_报销清单.xlsx").exists()
     assert not (tmp_path / "out" / "B" / "00_报销清单.xlsx").exists()
     packages = {package["id"]: package for package in TASKS["task-batch-export-one"]["packages"]}

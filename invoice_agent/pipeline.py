@@ -11,10 +11,21 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Protocol
 
 from .analysis import assign_reimbursement_categories
+from .company_reimbursement import build_company_reimbursement_data, write_company_workbook
 from .excel import build_preview, write_workbook
 from .extractor import is_invoice_type, parse_amount
-from .models import BatchOrganizeItem, BatchOrganizeResult, ExpenseRecord, OrganizeResult, ParsedDocument, TripInfo
+from .models import (
+    BatchOrganizeItem,
+    BatchOrganizeResult,
+    ExpenseRecord,
+    ExportArtifact,
+    ExportResult,
+    OrganizeResult,
+    ParsedDocument,
+    TripInfo,
+)
 from .ocr import PaddleOcrProvider
+from .pdf_export import export_company_pdf
 from .scanner import SUPPORTED_EXTENSIONS, scan_documents, sha256_file
 from .trip_audit import TripAuditLlmClient, TripAuditPolicy, run_trip_audit
 
@@ -177,14 +188,19 @@ def export_records(
     apply: bool = False,
     write_excel: bool = True,
     trip_audit=None,
-) -> None:
+) -> ExportResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     if apply:
         _copy_records(records, output_dir)
-    write_result_files(output_dir, records, write_excel=write_excel, trip_audit=trip_audit)
+    return write_result_files(output_dir, records, write_excel=write_excel, trip_audit=trip_audit)
 
 
-def write_result_files(output_dir: Path, records: List[ExpenseRecord], write_excel: bool, trip_audit=None) -> None:
+def write_result_files(
+    output_dir: Path,
+    records: List[ExpenseRecord],
+    write_excel: bool,
+    trip_audit=None,
+) -> ExportResult:
     (output_dir / "raw_results.json").write_text(
         json.dumps([record.to_json() for record in records], ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -211,8 +227,35 @@ def write_result_files(output_dir: Path, records: List[ExpenseRecord], write_exc
             json.dumps(trip_audit.to_json(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    if write_excel:
-        write_workbook(output_dir / "00_报销清单.xlsx", records, trip_audit)
+    if not write_excel:
+        return ExportResult(status="success")
+    artifacts: List[ExportArtifact] = []
+    warnings: List[str] = []
+    summary_path = output_dir / "00_报销清单.xlsx"
+    write_workbook(summary_path, records, trip_audit)
+    artifacts.append(ExportArtifact("summary_excel", summary_path, "success"))
+    company_path = output_dir / "01_公司报销单.xlsx"
+    pdf_path = output_dir / "01_公司报销单.pdf"
+    try:
+        data = build_company_reimbursement_data(records)
+        write_company_workbook(company_path, data)
+        artifacts.append(ExportArtifact("company_excel", company_path, "success"))
+        warnings.extend(data.warnings)
+    except Exception as exc:
+        message = f"公司报销单生成失败：{exc}"
+        artifacts.append(ExportArtifact("company_excel", company_path, "failed", message))
+        warnings.append(message)
+        return ExportResult(status="partial_success", artifacts=artifacts, warnings=warnings)
+    pdf_result = export_company_pdf(company_path, pdf_path)
+    artifacts.append(ExportArtifact("company_pdf", pdf_path, pdf_result.status, pdf_result.message))
+    if pdf_result.status == "failed":
+        warnings.append(pdf_result.message)
+        status = "partial_success"
+    else:
+        if pdf_result.status == "skipped" and pdf_result.message:
+            warnings.append(pdf_result.message)
+        status = "success"
+    return ExportResult(status=status, artifacts=artifacts, warnings=warnings)
 
 
 def _parse_records(

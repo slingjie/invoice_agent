@@ -875,18 +875,32 @@ def export_task(task_id: str) -> Dict[str, str]:
     if not records or not output_dir:
         raise ValueError("Task is not ready for export")
     update_task(task_id, state="exporting", stage="导出中", can_export=False)
-    export_records(output_dir, records, apply=apply, write_excel=True, trip_audit=trip_audit)
+    export_result = export_records(output_dir, records, apply=apply, write_excel=True, trip_audit=trip_audit)
     preview = build_preview(records, trip_audit)
     excel_path = str(output_dir / "00_报销清单.xlsx")
+    company_excel_path = export_result.artifact_path("company_excel")
+    company_pdf_path = export_result.artifact_path("company_pdf")
     update_task(
         task_id,
         state="done",
-        stage="完成",
+        stage="部分成功" if export_result.status == "partial_success" else "完成",
         excel_path=excel_path,
+        company_excel_path=company_excel_path,
+        company_pdf_path=company_pdf_path,
+        export_status=export_result.status,
+        export_warnings=export_result.warnings,
+        export_artifacts=[artifact.to_json() for artifact in export_result.artifacts],
         preview=preview,
         can_export=False,
     )
-    return {"excel_path": excel_path}
+    return {
+        "excel_path": excel_path,
+        "company_excel_path": company_excel_path,
+        "company_pdf_path": company_pdf_path,
+        "export_status": export_result.status,
+        "export_warnings": export_result.warnings,
+        "export_artifacts": [artifact.to_json() for artifact in export_result.artifacts],
+    }
 
 
 def export_batch_package(task_id: str, package_id: str) -> Dict[str, str]:
@@ -904,18 +918,39 @@ def export_batch_package(task_id: str, package_id: str) -> Dict[str, str]:
     if not records or not output_dir:
         raise ValueError("Package is not ready for export")
     _update_public_package_state(task_id, package_id, state="exporting", can_export=False)
-    export_records(output_dir, records, apply=apply, write_excel=True, trip_audit=trip_audit)
+    export_result = export_records(output_dir, records, apply=apply, write_excel=True, trip_audit=trip_audit)
     preview = build_preview(records, trip_audit)
     excel_path = str(output_dir / "00_报销清单.xlsx")
+    company_excel_path = export_result.artifact_path("company_excel")
+    company_pdf_path = export_result.artifact_path("company_pdf")
     with TASK_LOCK:
         task = TASKS.get(task_id)
         if task:
-            _update_public_package(task, package_id, state="done", preview=preview, can_export=False, excel_path=excel_path)
+            _update_public_package(
+                task,
+                package_id,
+                state="done",
+                preview=preview,
+                can_export=False,
+                excel_path=excel_path,
+                company_excel_path=company_excel_path,
+                company_pdf_path=company_pdf_path,
+                export_status=export_result.status,
+                export_warnings=export_result.warnings,
+                export_artifacts=[artifact.to_json() for artifact in export_result.artifacts],
+            )
             task["state"] = batch_task_state(task)
             task["stage"] = "批量处理完成" if task["state"] == "done" else "等待确认"
             task["can_export"] = any(package.get("can_export") for package in task.get("packages", []))
             task["updated_at"] = time.time()
-    return {"excel_path": excel_path}
+    return {
+        "excel_path": excel_path,
+        "company_excel_path": company_excel_path,
+        "company_pdf_path": company_pdf_path,
+        "export_status": export_result.status,
+        "export_warnings": export_result.warnings,
+        "export_artifacts": [artifact.to_json() for artifact in export_result.artifacts],
+    }
 
 
 def export_all_batch_packages(task_id: str) -> Dict:

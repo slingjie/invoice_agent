@@ -105,9 +105,15 @@ python -m invoice_agent organize ./测试发票 \
 
 ```text
 00_报销清单.xlsx
+01_公司报销单.xlsx
+01_公司报销单.pdf
 raw_results.json
 rename_plan.json
 ```
+
+`01_公司报销单.xlsx` 按公司正式模板生成：报销明细表使用 A4 纵向，差旅费和日常费用报销单使用 A5 横向。日常费用每 8 条自动分页，差旅交通每 12 条自动分页；没有日常费用时不会生成空白日常费用页。
+
+在 Windows 且安装 Microsoft Excel 时，程序会同步生成合并打印文件 `01_公司报销单.pdf`。其他环境会保留两份 Excel 并提示跳过 PDF；PDF 转换失败也不会删除已生成的 Excel。
 
 ## 批量报销包模式
 
@@ -144,11 +150,15 @@ python -m invoice_agent organize ./待整理报销 \
 整理结果/
   2026-03-杭州出差/
     00_报销清单.xlsx
+    01_公司报销单.xlsx
+    01_公司报销单.pdf
     raw_results.json
     rename_plan.json
     trip_audit.json
   2026-04-南京出差/
     00_报销清单.xlsx
+    01_公司报销单.xlsx
+    01_公司报销单.pdf
     raw_results.json
     rename_plan.json
     trip_audit.json

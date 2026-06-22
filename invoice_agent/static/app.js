@@ -119,7 +119,11 @@ function renderTask(task) {
 
   if (task.state === 'done') {
     setTaskState('done');
-    statusBox.innerHTML = `整理完成。Excel：<code>${escapeHtml(task.excel_path || '')}</code>`;
+    const exportLabel = task.export_status === 'partial_success' ? '部分成功' : '整理完成';
+    const warnings = (task.export_warnings || []).map((item) => `<div>${escapeHtml(item)}</div>`).join('');
+    statusBox.innerHTML = `${exportLabel}。清单：<code>${escapeHtml(task.excel_path || '')}</code>` +
+      `<br>公司报销单：<code>${escapeHtml(task.company_excel_path || '')}</code>` +
+      `<br>打印 PDF：<code>${escapeHtml(task.company_pdf_path || '')}</code>${warnings}`;
     exportButton.disabled = true;
     exportButton.textContent = '已导出';
   } else if (task.state === 'review') {
@@ -171,7 +175,7 @@ function renderBatchTask(task) {
       <td>${escapeHtml(item.name || '')}</td>
       <td><span class="badge ${cls}">${escapeHtml(packageStateLabel(item.state))}</span></td>
       <td>${escapeHtml(item.total || 0)} 个文件</td>
-      <td>${escapeHtml(item.excel_path || '')}</td>
+      <td>${escapeHtml(item.company_pdf_path || item.company_excel_path || item.excel_path || '')}</td>
       <td>${escapeHtml(item.error || '')}</td>
     </tr>`;
   }).join('');
