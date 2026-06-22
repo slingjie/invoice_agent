@@ -15,6 +15,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [OCR Provider](./ocr.md) | OCR provider patterns, async gotchas, concurrency limits | Active |
+| [公司报销单导出](./company-reimbursement-export.md) | 公司 Excel/PDF 产物、分页、金额口径与部分成功契约 | Active |
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
 | [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
