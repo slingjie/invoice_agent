@@ -91,7 +91,8 @@ export INVOICE_AGENT_LLM_API_KEY="your-api-key"
 ## 预览模式
 
 ```bash
-python -m invoice_agent organize ./测试发票 \
+# macOS / Linux
+python3 -m invoice_agent organize ./测试发票 \
   --config ./invoice_agent_config.json \
   --trip-info ./trip_info.json \
   --out-dir ./整理结果预览 \
@@ -99,6 +100,12 @@ python -m invoice_agent organize ./测试发票 \
   --timeout-seconds 120 \
   --city-transport-daily-limit 100 \
   --lodging-daily-limit 450
+
+# Windows
+python -m invoice_agent organize ./测试发票 ^
+  --config ./invoice_agent_config.json ^
+  --trip-info ./trip_info.json ^
+  --out-dir ./整理结果预览
 ```
 
 输出：
@@ -120,7 +127,8 @@ rename_plan.json
 默认仍是单报销包模式：系统会递归扫描一个文件夹，并合并成一次出差处理。一次整理多个出差文件夹时，可以启用批量模式，让每个一级子文件夹独立生成预览和输出：
 
 ```bash
-python -m invoice_agent organize ./待整理报销 \
+# macOS / Linux
+python3 -m invoice_agent organize ./待整理报销 \
   --mode batch-subfolders \
   --config ./invoice_agent_config.json \
   --out-dir ./整理结果 \
@@ -167,7 +175,8 @@ python -m invoice_agent organize ./待整理报销 \
 ## 执行复制重命名
 
 ```bash
-python -m invoice_agent organize ./测试发票 \
+# macOS / Linux
+python3 -m invoice_agent organize ./测试发票 \
   --config ./invoice_agent_config.json \
   --trip-info ./trip_info.json \
   --out-dir ./整理结果 \
@@ -188,10 +197,17 @@ python -m invoice_agent organize ./测试发票 \
 启动：
 
 ```bash
+# macOS / Linux
+python3 -m invoice_agent ui
+
+# Windows
 python -m invoice_agent ui
 ```
 
-> **Windows 用户注意：** 请使用 `python` 而不是 `python3`，且需在项目根目录运行。
+> 首次运行前请先 `cd` 到项目根目录（`invoice agent` 文件夹），并在当前目录安装依赖。
+>
+> **Windows 用户注意：** 使用 `python` 而不是 `python3`。
+> **macOS / Linux 用户注意：** 使用 `python3` 而不是 `python`。
 
 浏览器打开：
 
@@ -226,6 +242,13 @@ UI 提交后会创建后台任务，页面每秒刷新：
 - 识别完成后的预览表格
 - 确认导出后的 Excel 路径
 
+识别过程中可以使用两种取消操作：
+
+- **停止识别**：不再启动新的文件识别，等待当前正在识别的文件完成。
+- **终止任务**：停止本地等待并取消尚未完成的异步识别；操作前会二次确认。
+
+停止或终止后，已经完成的识别结果仍可预览，未完成文件会标记为“已停止”或“已终止”。由于结果不完整，本次任务不能导出，需要重新提交任务。已经提交到 PaddleOCR 服务端的 Job 可能仍会继续运行，但本地不会继续等待或接收其结果。
+
 ## 识别速度
 
 默认使用 PaddleOCR 异步 Job API（V1.6 模型）：
@@ -246,6 +269,10 @@ UI 提交后会创建后台任务，页面每秒刷新：
 ## 依赖安装
 
 ```bash
+# macOS / Linux
+python3 -m pip install -r requirements.txt
+
+# Windows
 pip install -r requirements.txt
 ```
 

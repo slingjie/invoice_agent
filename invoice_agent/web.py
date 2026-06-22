@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from .cancellation import CancellationControl
 from .config import load_agent_config
 from .excel import build_preview
 from .models import TripInfo
@@ -60,8 +61,8 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>出差报销包整理 Agent</title>
-  <link rel="stylesheet" href="/static/app.css?v=config-collapse-v1">
-  <script src="/static/app.js?v=config-collapse-v1" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=task-cancellation-v1">
+  <script src="/static/app.js?v=task-cancellation-v1" defer></script>
 </head>
 <body data-initial-task-id="{html.escape(start_task_id)}" data-task-state="idle">
   <div class="app-shell">
@@ -192,6 +193,10 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
                 <div>
                   <div id="progress-title" class="progress-title">等待开始</div>
                   <div id="progress-meta" class="progress-meta"></div>
+                </div>
+                <div class="task-cancel-actions" aria-label="识别任务控制">
+                  <button id="stop-task-button" class="secondary" type="button" hidden>停止识别</button>
+                  <button id="terminate-task-button" class="danger-button" type="button" hidden>终止任务</button>
                 </div>
               </div>
               <div class="table-frame">
@@ -365,6 +370,20 @@ class InvoiceAgentHandler(BaseHTTPRequestHandler):
             return
 
     def do_POST(self) -> None:
+        if self.path.startswith("/tasks/") and self.path.endswith("/stop"):
+            task_id = self.path.split("/")[2]
+            try:
+                self._send_json(request_task_stop(task_id))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+        if self.path.startswith("/tasks/") and self.path.endswith("/terminate"):
+            task_id = self.path.split("/")[2]
+            try:
+                self._send_json(request_task_terminate(task_id))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
         package_record = parse_task_package_record_path(self.path)
         if package_record:
             task_id, package_id, sequence = package_record
@@ -703,6 +722,7 @@ def start_organize_task(form: Dict[str, str]) -> str:
             "output_dir": "",
             "excel_path": "",
             "error": "",
+            "_cancellation": CancellationControl(),
         }
     thread = threading.Thread(target=run_organize_task, args=(task_id, dict(form)), daemon=True)
     thread.start()
@@ -743,6 +763,36 @@ def get_task_snapshot(task_id: str) -> Dict:
     return task
 
 
+def request_task_stop(task_id: str) -> Dict:
+    with TASK_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        if task.get("state") in {"queued", "running", "stopping"}:
+            control = task.setdefault("_cancellation", CancellationControl())
+            control.request_stop()
+            task["state"] = "stopping"
+            task["stage"] = "正在停止识别，等待当前文件完成"
+            task["can_export"] = False
+            task["updated_at"] = time.time()
+    return get_task_snapshot(task_id)
+
+
+def request_task_terminate(task_id: str) -> Dict:
+    with TASK_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        if task.get("state") in {"queued", "running", "stopping", "terminating"}:
+            control = task.setdefault("_cancellation", CancellationControl())
+            control.request_terminate()
+            task["state"] = "terminating"
+            task["stage"] = "正在终止任务"
+            task["can_export"] = False
+            task["updated_at"] = time.time()
+    return get_task_snapshot(task_id)
+
+
 def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
     import logging
     _log = logging.getLogger("invoice_agent.web")
@@ -764,6 +814,12 @@ def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
         timeout_seconds=timeout_seconds,
         request_timeout_seconds=config.request_timeout_seconds,
     )
+    cancellation = None
+    if task_id:
+        with TASK_LOCK:
+            task = TASKS.get(task_id)
+            if task:
+                cancellation = task.setdefault("_cancellation", CancellationControl())
     _log.info("Provider created, starting OCR for folder=%s mode=%s", folder, organize_mode)
     trip_info = TripInfo(
         project_name=form.get("project_name") or folder.name,
@@ -809,6 +865,7 @@ def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
             write_excel=task_id is None,
             trip_audit_policy=trip_audit_policy,
             item_callback=publish_batch_item if task_id else None,
+            cancellation=cancellation,
         )
         if task_id:
             package_rows, package_state = build_batch_task_packages(result, form.get("apply") == "1", trip_audit_policy)
@@ -817,15 +874,24 @@ def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
             failed = sum(1 for package in package_rows if package["state"] == "failed")
             skipped = sum(1 for package in package_rows if package["state"] == "skipped")
             reviewable = sum(1 for package in package_rows if package["state"] == "review")
+            cancelled_mode = cancellation.mode if cancellation else "none"
+            if cancelled_mode != "none":
+                for package in package_rows:
+                    package["can_export"] = False
+                final_state = "terminated" if cancelled_mode == "terminate" else "stopped"
+                final_stage = "任务已终止" if final_state == "terminated" else "识别已停止"
+            else:
+                final_state = "review" if reviewable else ("failed" if failed and not completed - failed - skipped else "done")
+                final_stage = "等待确认" if reviewable else "批量处理完成"
             update_task(
                 task_id,
                 mode=ORGANIZE_MODE_BATCH_SUBFOLDERS,
-                state="review" if reviewable else ("failed" if failed and not completed - failed - skipped else "done"),
-                stage="等待确认" if reviewable else "批量处理完成",
+                state=final_state,
+                stage=final_stage,
                 output_dir=str(result.output_dir),
                 excel_path="",
                 preview={},
-                can_export=bool(reviewable),
+                can_export=bool(reviewable) and cancelled_mode == "none",
                 total=total,
                 completed=completed,
                 failed=failed,
@@ -848,9 +914,28 @@ def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
         progress_callback=(lambda record: mark_task_file_done(task_id, record)) if task_id else None,
         write_excel=task_id is None,
         trip_audit_policy=trip_audit_policy,
+        cancellation=cancellation,
     )
     if task_id:
         sync_task_files_from_records(task_id, result.records)
+        if result.cancellation_mode != "none":
+            final_state = "terminated" if result.cancellation_mode == "terminate" else "stopped"
+            finalize_cancelled_task_files(task_id, final_state)
+            update_task(
+                task_id,
+                state=final_state,
+                stage="任务已终止" if final_state == "terminated" else "识别已停止",
+                output_dir=str(result.output_dir),
+                excel_path="",
+                preview=result.preview,
+                can_export=False,
+                _records=result.records,
+                _output_dir=result.output_dir,
+                _apply=form.get("apply") == "1",
+                _trip_audit_policy=trip_audit_policy,
+                _trip_audit=result.trip_audit,
+            )
+            return result
         update_task(
             task_id,
             state="review",
@@ -877,6 +962,8 @@ def export_task(task_id: str) -> Dict[str, str]:
             raise ValueError("Task not found")
         if task.get("mode") == ORGANIZE_MODE_BATCH_SUBFOLDERS:
             raise ValueError("批量报销包模式请使用单个报销包导出或导出全部")
+        if task.get("state") != "review" or not task.get("can_export"):
+            raise ValueError("Task is not ready for export")
         records = task.get("_records")
         output_dir = task.get("_output_dir")
         apply = bool(task.get("_apply"))
@@ -917,6 +1004,8 @@ def export_batch_package(task_id: str, package_id: str) -> Dict[str, str]:
         task = TASKS.get(task_id)
         if not task:
             raise ValueError("Task not found")
+        if task.get("state") in {"stopping", "stopped", "terminating", "terminated"}:
+            raise ValueError("Task is not ready for export")
         package = (task.get("_packages") or {}).get(package_id)
         if not package:
             raise ValueError("Package not found")
@@ -967,6 +1056,8 @@ def export_all_batch_packages(task_id: str) -> Dict:
         task = TASKS.get(task_id)
         if not task:
             raise ValueError("Task not found")
+        if task.get("state") in {"stopping", "stopped", "terminating", "terminated"}:
+            raise ValueError("Task is not ready for export")
         packages = list(task.get("packages") or [])
     update_task(task_id, state="exporting", stage="批量导出中", can_export=False)
     exported = []
@@ -1068,8 +1159,16 @@ def publish_batch_task_item(
         packages.append(public_package)
         task.setdefault("_packages", {})[package_id] = package_state
         task["mode"] = ORGANIZE_MODE_BATCH_SUBFOLDERS
-        task["state"] = "running"
-        task["stage"] = f"批量识别中，已完成 {len(packages)} 个报销包"
+        cancellation = task.get("_cancellation")
+        if cancellation and cancellation.mode == "terminate":
+            task["state"] = "terminating"
+            task["stage"] = "正在终止任务"
+        elif cancellation and cancellation.mode == "stop":
+            task["state"] = "stopping"
+            task["stage"] = "正在停止识别，等待当前文件完成"
+        else:
+            task["state"] = "running"
+            task["stage"] = f"批量识别中，已完成 {len(packages)} 个报销包"
         task["total"] = len(packages)
         task["completed"] = sum(1 for package in packages if package.get("state") in {"review", "done", "failed", "skipped"})
         task["failed"] = sum(1 for package in packages if package.get("state") == "failed")
@@ -1208,6 +1307,23 @@ def sync_task_files_from_records(task_id: str, records, package_id: str | None =
                 }
             )
         task["completed"] = sum(1 for row in rows if row.get("status") not in {"等待中", "识别中"})
+        task["updated_at"] = time.time()
+
+
+def finalize_cancelled_task_files(task_id: str, final_state: str) -> None:
+    file_status = "已终止" if final_state == "terminated" else "已停止"
+    with TASK_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            return
+        rows = task.get("files", [])
+        for row in rows:
+            if row.get("status") in {"等待中", "识别中"}:
+                row["status"] = file_status
+                row["message"] = "任务已终止" if final_state == "terminated" else "识别已停止"
+        task["completed"] = sum(
+            1 for row in rows if row.get("status") not in {"等待中", "识别中", "已停止", "已终止"}
+        )
         task["updated_at"] = time.time()
 
 

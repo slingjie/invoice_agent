@@ -18,6 +18,8 @@ const batchPackages = document.getElementById('batch-packages');
 const flowSteps = Array.from(document.querySelectorAll('[data-flow-step]'));
 const workspaceGrid = document.querySelector('.workspace-grid');
 const configPanelToggle = document.getElementById('config-panel-toggle');
+const stopTaskButton = document.getElementById('stop-task-button');
+const terminateTaskButton = document.getElementById('terminate-task-button');
 
 let pollTimer = null;
 let currentTaskId = null;
@@ -43,6 +45,15 @@ function setTaskState(state) {
   statusBox.classList.remove('status-idle', 'status-running', 'status-review', 'status-exporting', 'status-done', 'status-failed');
   statusBox.classList.add(`status-${normalized}`);
   renderStepper(normalized);
+}
+
+function updateTaskCancelControls(state) {
+  const canStop = state === 'queued' || state === 'running';
+  const canTerminate = canStop || state === 'stopping';
+  stopTaskButton.hidden = !canStop;
+  terminateTaskButton.hidden = !canTerminate;
+  stopTaskButton.disabled = false;
+  terminateTaskButton.disabled = false;
 }
 
 function renderStepper(state) {
@@ -108,7 +119,7 @@ async function pollTask(taskId) {
     const response = await fetch(`/tasks/${taskId}`);
     const task = await response.json();
     renderTask(task);
-    if (task.state === 'done' || task.state === 'failed' || task.state === 'review') {
+    if (['done', 'failed', 'review', 'stopped', 'terminated'].includes(task.state)) {
       window.clearInterval(pollTimer);
       button.disabled = false;
       button.textContent = '开始整理';
@@ -119,6 +130,7 @@ async function pollTask(taskId) {
 }
 
 function renderTask(task) {
+  updateTaskCancelControls(task.state);
   currentTaskMode = task.mode || 'single';
   if (task.mode === 'batch_subfolders') {
     renderBatchTask(task);
@@ -131,7 +143,19 @@ function renderTask(task) {
   meta.textContent = `已用时 ${elapsed} 秒`;
   count.textContent = `${task.completed || 0} / ${task.total || 0}`;
 
-  if (task.state === 'done') {
+  if (task.state === 'stopping' || task.state === 'terminating') {
+    setTaskState('running');
+    statusBox.innerHTML = `<span class="spinner"></span>${escapeHtml(task.stage || '正在取消任务')}。`;
+    exportButton.disabled = true;
+    exportButton.textContent = '确认导出';
+  } else if (task.state === 'stopped' || task.state === 'terminated') {
+    setTaskState('failed');
+    statusBox.textContent = task.state === 'terminated'
+      ? '任务已终止。已完成结果可预览，本次任务不可导出。'
+      : '识别已停止。已完成结果可预览，本次任务不可导出。';
+    exportButton.disabled = true;
+    exportButton.textContent = '任务不完整，无法导出';
+  } else if (task.state === 'done') {
     setTaskState('done');
     const exportLabel = task.export_status === 'partial_success' ? '部分成功' : '整理完成';
     const warnings = (task.export_warnings || []).map((item) => `<div>${escapeHtml(item)}</div>`).join('');
@@ -176,6 +200,7 @@ function renderTask(task) {
 }
 
 function renderBatchTask(task) {
+  updateTaskCancelControls(task.state);
   const elapsed = task.elapsed_seconds || 0;
   const packages = task.packages || [];
   const failed = task.failed || packages.filter((item) => item.state === 'failed').length;
@@ -202,7 +227,19 @@ function renderBatchTask(task) {
   renderBatchPackages(packages, currentPackageId, task.state);
   renderPreview(currentPackage ? currentPackage.preview : null, currentPackageId);
 
-  if (task.state === 'failed') {
+  if (task.state === 'stopping' || task.state === 'terminating') {
+    setTaskState('running');
+    statusBox.innerHTML = `<span class="spinner"></span>${escapeHtml(task.stage || '正在取消任务')}。`;
+    exportButton.disabled = true;
+    exportButton.textContent = '等待任务结束';
+  } else if (task.state === 'stopped' || task.state === 'terminated') {
+    setTaskState('failed');
+    statusBox.textContent = task.state === 'terminated'
+      ? '批量任务已终止。已完成结果可预览，本次任务不可导出。'
+      : '批量识别已停止。已完成结果可预览，本次任务不可导出。';
+    exportButton.disabled = true;
+    exportButton.textContent = '任务不完整，无法导出';
+  } else if (task.state === 'failed') {
     setTaskState('failed');
     statusBox.textContent = `批量整理失败：${task.error || '没有可导出的报销包'}`;
     exportButton.disabled = true;
@@ -289,6 +326,39 @@ exportButton.addEventListener('click', async function() {
     exportButton.disabled = false;
     exportButton.textContent = '确认导出';
   }
+});
+
+async function requestTaskCancellation(action) {
+  if (!currentTaskId) {
+    return;
+  }
+  stopTaskButton.disabled = true;
+  terminateTaskButton.disabled = true;
+  try {
+    const endpoint = action === 'stop'
+      ? `/tasks/${currentTaskId}/stop`
+      : `/tasks/${currentTaskId}/terminate`;
+    const response = await fetch(endpoint, {method: 'POST'});
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    renderTask(data);
+  } catch (error) {
+    statusBox.textContent = `任务操作失败：${error.message}`;
+    updateTaskCancelControls('running');
+  }
+}
+
+stopTaskButton.addEventListener('click', function() {
+  requestTaskCancellation('stop');
+});
+
+terminateTaskButton.addEventListener('click', function() {
+  if (!window.confirm('确定终止任务吗？未完成文件将不再等待，本次任务不能导出。')) {
+    return;
+  }
+  requestTaskCancellation('terminate');
 });
 
 batchPackages.addEventListener('click', async function(event) {
@@ -941,4 +1011,5 @@ if (initialTaskId) {
   pollTask(initialTaskId);
 } else {
   setTaskState('idle');
+  updateTaskCancelControls('idle');
 }

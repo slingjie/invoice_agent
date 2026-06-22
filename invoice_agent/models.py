@@ -80,6 +80,7 @@ class OrganizeResult:
     records: List[ExpenseRecord]
     preview: Dict[str, Any] = field(default_factory=dict)
     trip_audit: Any = None
+    cancellation_mode: str = "none"
 
 
 @dataclass

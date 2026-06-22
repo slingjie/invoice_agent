@@ -602,6 +602,23 @@ select:focus {
   margin-bottom: 12px;
 }
 
+.task-cancel-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+button.danger-button {
+  border: 1px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+button.danger-button:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
 .progress-title {
   font-weight: 900;
 }

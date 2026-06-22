@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Protocol
 
 from .analysis import assign_reimbursement_categories
+from .cancellation import CancellationControl
 from .company_reimbursement import build_company_reimbursement_data, write_company_workbook
 from .excel import build_preview, write_workbook
 from .extractor import is_invoice_type, parse_amount
@@ -65,6 +66,7 @@ def organize_folder(
     write_excel: bool = True,
     trip_audit_policy: Optional[TripAuditPolicy] = None,
     trip_audit_llm_client: Optional[TripAuditLlmClient] = None,
+    cancellation: Optional[CancellationControl] = None,
 ) -> OrganizeResult:
     folder = folder.expanduser().resolve()
     trip = resolve_trip_info(folder, trip_info_path, trip_info)
@@ -73,7 +75,14 @@ def organize_folder(
 
     provider = ocr_provider or PaddleOcrProvider()
     paths = [path for path in scan_documents(folder) if not _is_inside(path, output_dir)]
-    records = _parse_records(paths, trip, provider, max_workers=max_workers, progress_callback=progress_callback)
+    records = _parse_records(
+        paths,
+        trip,
+        provider,
+        max_workers=max_workers,
+        progress_callback=progress_callback,
+        cancellation=cancellation,
+    )
     _mark_duplicates(records)
     _link_itineraries(records)
     records.sort(key=_sort_key)
@@ -85,7 +94,13 @@ def organize_folder(
         export_records(output_dir, records, apply=apply, write_excel=True, trip_audit=trip_audit)
     else:
         write_result_files(output_dir, records, write_excel=False, trip_audit=trip_audit)
-    return OrganizeResult(output_dir=output_dir, records=records, preview=build_preview(records, trip_audit), trip_audit=trip_audit)
+    return OrganizeResult(
+        output_dir=output_dir,
+        records=records,
+        preview=build_preview(records, trip_audit),
+        trip_audit=trip_audit,
+        cancellation_mode=cancellation.mode if cancellation else "none",
+    )
 
 
 def organize_batch_subfolders(
@@ -99,6 +114,7 @@ def organize_batch_subfolders(
     trip_audit_policy: Optional[TripAuditPolicy] = None,
     trip_audit_llm_client: Optional[TripAuditLlmClient] = None,
     item_callback: Optional[Callable[[BatchOrganizeItem], None]] = None,
+    cancellation: Optional[CancellationControl] = None,
 ) -> BatchOrganizeResult:
     root = folder.expanduser().resolve()
     if not root.exists() or not root.is_dir():
@@ -108,9 +124,24 @@ def organize_batch_subfolders(
     output_root.mkdir(parents=True, exist_ok=True)
 
     items: List[BatchOrganizeItem] = []
-    for package_folder in discover_batch_package_folders(root, output_root):
+    package_folders = discover_batch_package_folders(root, output_root)
+    for package_folder in package_folders:
         output_dir = _unique_target(output_root / (sanitize_filename(package_folder.name) or "报销包"))
         package_id = sanitize_filename(package_folder.name).replace(" ", "-") or f"package-{len(items) + 1}"
+        if cancellation and cancellation.should_stop_starting():
+            state = "terminated" if cancellation.should_terminate() else "stopped"
+            item = BatchOrganizeItem(
+                package_id=package_id,
+                name=package_folder.name,
+                folder=package_folder,
+                output_dir=output_dir,
+                state=state,
+                error="任务已终止" if state == "terminated" else "识别已停止",
+            )
+            items.append(item)
+            if item_callback:
+                item_callback(item)
+            continue
         documents = scan_documents(package_folder)
         if not documents:
             item = BatchOrganizeItem(
@@ -137,13 +168,24 @@ def organize_batch_subfolders(
                 write_excel=write_excel,
                 trip_audit_policy=trip_audit_policy,
                 trip_audit_llm_client=trip_audit_llm_client,
+                cancellation=cancellation,
             )
+            cancelled_state = None
+            if result.cancellation_mode == "stop":
+                cancelled_state = "stopped"
+            elif result.cancellation_mode == "terminate":
+                cancelled_state = "terminated"
             item = BatchOrganizeItem(
                 package_id=package_id,
                 name=package_folder.name,
                 folder=package_folder,
                 output_dir=output_dir,
-                state="done" if write_excel else "review",
+                state=cancelled_state or ("done" if write_excel else "review"),
+                error=(
+                    "任务已终止"
+                    if cancelled_state == "terminated"
+                    else ("识别已停止" if cancelled_state == "stopped" else "")
+                ),
                 result=result,
             )
             items.append(item)
@@ -264,8 +306,9 @@ def _parse_records(
     provider: OcrProvider,
     max_workers: int,
     progress_callback: Optional[Callable[[ExpenseRecord], None]] = None,
+    cancellation: Optional[CancellationControl] = None,
 ) -> List[ExpenseRecord]:
-    if hasattr(provider, "parse_many") and progress_callback is None:
+    if hasattr(provider, "parse_many") and progress_callback is None and cancellation is None:
         try:
             parsed_docs = provider.parse_many(paths, max_workers=max_workers)  # type: ignore[attr-defined]
         except TypeError:
@@ -275,11 +318,24 @@ def _parse_records(
     if workers == 1:
         records = []
         for path in paths:
-            record = _record_from_path(path, trip, provider)
+            if cancellation and cancellation.should_stop_starting():
+                break
+            record = _record_from_path_with_cancellation(path, trip, provider, cancellation)
+            if cancellation and cancellation.should_terminate():
+                break
             if progress_callback:
                 progress_callback(record)
             records.append(record)
         return records
+    if cancellation is not None:
+        return _parse_records_with_cancellation(
+            paths,
+            trip,
+            provider,
+            workers,
+            progress_callback,
+            cancellation,
+        )
     records_by_path: Dict[Path, ExpenseRecord] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_record_from_path, path, trip, provider): path for path in paths}
@@ -290,6 +346,71 @@ def _parse_records(
             if progress_callback:
                 progress_callback(record)
     return [records_by_path[path] for path in paths]
+
+
+def _parse_records_with_cancellation(
+    paths: List[Path],
+    trip: TripInfo,
+    provider: OcrProvider,
+    workers: int,
+    progress_callback: Optional[Callable[[ExpenseRecord], None]],
+    cancellation: CancellationControl,
+) -> List[ExpenseRecord]:
+    records_by_path: Dict[Path, ExpenseRecord] = {}
+    path_iter = iter(paths)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+
+        def submit_next() -> bool:
+            if cancellation.should_stop_starting():
+                return False
+            try:
+                path = next(path_iter)
+            except StopIteration:
+                return False
+            future = executor.submit(_record_from_path_with_cancellation, path, trip, provider, cancellation)
+            futures[future] = path
+            return True
+
+        for _ in range(workers):
+            if not submit_next():
+                break
+
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            if cancellation.should_terminate():
+                for future in futures:
+                    future.cancel()
+                break
+            for future in done:
+                path = futures.pop(future)
+                if future.cancelled():
+                    continue
+                record = future.result()
+                records_by_path[path] = record
+                if progress_callback:
+                    progress_callback(record)
+            while len(futures) < workers and submit_next():
+                pass
+
+    return [records_by_path[path] for path in paths if path in records_by_path]
+
+
+def _record_from_path_with_cancellation(
+    path: Path,
+    trip: TripInfo,
+    provider: OcrProvider,
+    cancellation: Optional[CancellationControl],
+) -> ExpenseRecord:
+    if cancellation is None:
+        return _record_from_path(path, trip, provider)
+    try:
+        parsed = provider.parse(path, cancellation=cancellation)  # type: ignore[call-arg]
+    except TypeError as exc:
+        if "cancellation" not in str(exc):
+            raise
+        parsed = provider.parse(path)
+    return _record_from_parsed(path, trip, parsed)
 
 
 def resolve_trip_info(
