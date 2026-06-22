@@ -91,7 +91,8 @@ export INVOICE_AGENT_LLM_API_KEY="your-api-key"
 ## 预览模式
 
 ```bash
-python -m invoice_agent organize ./测试发票 \
+# macOS / Linux
+python3 -m invoice_agent organize ./测试发票 \
   --config ./invoice_agent_config.json \
   --trip-info ./trip_info.json \
   --out-dir ./整理结果预览 \
@@ -99,6 +100,12 @@ python -m invoice_agent organize ./测试发票 \
   --timeout-seconds 120 \
   --city-transport-daily-limit 100 \
   --lodging-daily-limit 450
+
+# Windows
+python -m invoice_agent organize ./测试发票 ^
+  --config ./invoice_agent_config.json ^
+  --trip-info ./trip_info.json ^
+  --out-dir ./整理结果预览
 ```
 
 输出：
@@ -114,7 +121,8 @@ rename_plan.json
 默认仍是单报销包模式：系统会递归扫描一个文件夹，并合并成一次出差处理。一次整理多个出差文件夹时，可以启用批量模式，让每个一级子文件夹独立生成预览和输出：
 
 ```bash
-python -m invoice_agent organize ./待整理报销 \
+# macOS / Linux
+python3 -m invoice_agent organize ./待整理报销 \
   --mode batch-subfolders \
   --config ./invoice_agent_config.json \
   --out-dir ./整理结果 \
@@ -157,7 +165,8 @@ python -m invoice_agent organize ./待整理报销 \
 ## 执行复制重命名
 
 ```bash
-python -m invoice_agent organize ./测试发票 \
+# macOS / Linux
+python3 -m invoice_agent organize ./测试发票 \
   --config ./invoice_agent_config.json \
   --trip-info ./trip_info.json \
   --out-dir ./整理结果 \
@@ -178,10 +187,17 @@ python -m invoice_agent organize ./测试发票 \
 启动：
 
 ```bash
+# macOS / Linux
+python3 -m invoice_agent ui
+
+# Windows
 python -m invoice_agent ui
 ```
 
-> **Windows 用户注意：** 请使用 `python` 而不是 `python3`，且需在项目根目录运行。
+> 首次运行前请先 `cd` 到项目根目录（`invoice agent` 文件夹），并在当前目录安装依赖。
+>
+> **Windows 用户注意：** 使用 `python` 而不是 `python3`。
+> **macOS / Linux 用户注意：** 使用 `python3` 而不是 `python`。
 
 浏览器打开：
 
@@ -236,6 +252,10 @@ UI 提交后会创建后台任务，页面每秒刷新：
 ## 依赖安装
 
 ```bash
+# macOS / Linux
+python3 -m pip install -r requirements.txt
+
+# Windows
 pip install -r requirements.txt
 ```
 
