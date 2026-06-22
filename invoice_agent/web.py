@@ -60,8 +60,8 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>出差报销包整理 Agent</title>
-  <link rel="stylesheet" href="/static/app.css?v=review-edit-v3">
-  <script src="/static/app.js?v=review-edit-v3" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=config-collapse-v1">
+  <script src="/static/app.js?v=config-collapse-v1" defer></script>
 </head>
 <body data-initial-task-id="{html.escape(start_task_id)}" data-task-state="idle">
   <div class="app-shell">
@@ -92,12 +92,21 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
         <aside class="config-panel">
           <form id="organize-form" class="task-card" method="post" action="/organize">
             <section class="form-section">
-              <div class="section-head">
+              <div class="section-head config-section-head">
                 <span class="section-index">1</span>
-                <div>
+                <div class="config-section-head-copy">
                   <h2>任务配置</h2>
                   <p>选择输入、输出和报销基础信息。</p>
                 </div>
+                <button
+                  id="config-panel-toggle"
+                  class="config-panel-toggle secondary"
+                  type="button"
+                  aria-expanded="true"
+                  aria-controls="organize-form"
+                  aria-label="收起任务配置"
+                  title="收起任务配置"
+                ><span aria-hidden="true">‹</span></button>
               </div>
               <div class="field-stack">
                 {path_field("folder", "发票文件夹", "./测试发票", "folder", "full")}

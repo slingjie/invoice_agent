@@ -16,12 +16,26 @@ const previewRename = document.getElementById('preview-rename-content');
 const exportButton = document.getElementById('export-button');
 const batchPackages = document.getElementById('batch-packages');
 const flowSteps = Array.from(document.querySelectorAll('[data-flow-step]'));
+const workspaceGrid = document.querySelector('.workspace-grid');
+const configPanelToggle = document.getElementById('config-panel-toggle');
 
 let pollTimer = null;
 let currentTaskId = null;
 let currentPackageId = null;
 let currentTaskMode = 'single';
 const tableColumnVisibility = {};
+
+function toggleConfigPanel() {
+  const collapsed = workspaceGrid.classList.toggle('is-config-collapsed');
+  const expanded = !collapsed;
+  const label = expanded ? '收起任务配置' : '展开任务配置';
+  configPanelToggle.setAttribute('aria-expanded', String(expanded));
+  configPanelToggle.setAttribute('aria-label', label);
+  configPanelToggle.title = label;
+  configPanelToggle.querySelector('span').textContent = expanded ? '‹' : '›';
+}
+
+configPanelToggle.addEventListener('click', toggleConfigPanel);
 
 function setTaskState(state) {
   const normalized = state || 'idle';
