@@ -1,51 +1,60 @@
 # Logging Guidelines
 
-> How logging is done in this project.
+> Logging conventions and best practices for `invoice_agent`.
 
 ---
 
-## Overview
+## Logger Initialization
 
-<!--
-Document your project's logging conventions here.
+Each module should obtain its logger using standard Python idioms:
 
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
+```python
+import logging
 
-(To be filled by the team)
+logger = logging.getLogger(__name__)
+```
+
+Do not use `print()` statements for diagnostic output in library or backend code. All operational output must route through `logging`.
 
 ---
 
-## Log Levels
+## Log Levels & Semantics
 
-<!-- When to use each level: debug, info, warn, error -->
-
-(To be filled by the team)
-
----
-
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
+| Level | When to Use | Examples in Codebase |
+|---|---|---|
+| **`DEBUG`** | Fine-grained tracing, raw response dumps, internal state inspections | Raw OCR coordinates, regex intermediate token matches |
+| **`INFO`** | Major pipeline milestones, configuration loading, lifecycle events | Starting folder scan, task start/finish, artifact export paths |
+| **`WARNING`**| Recoverable issues, retry attempts, non-fatal skips, fallback triggers | Transient network errors triggering retry, missing Excel for PDF export |
+| **`ERROR`** | Unrecoverable failures for a specific document or operation | File read permission error, invalid corrupted PDF, OCR fatal failure |
+| **`CRITICAL`**| Complete failure of the application or background runner | Unhandled thread crash in `run_organize_task` |
 
 ---
 
-## What to Log
+## Formatting & Conventions
 
-<!-- Important events to log -->
+### 1. Use Lazy Formatting
+Always pass arguments as parameters rather than using f-strings or `.format()` inside log calls. This defers string formatting until the logger determines the message level is enabled:
 
-(To be filled by the team)
+```python
+# Good:
+logger.warning(
+    "SDK transient error for %s (attempt %d/%d), retrying in %.1fs: %s",
+    path.name, attempt + 1, self._RETRY_MAX, delay, exc_message,
+)
 
----
+# Bad:
+logger.warning(f"SDK transient error for {path.name}...")
+```
 
-## What NOT to Log
+### 2. Contextual Information
+Log messages should contain enough context to identify the affected document and batch without guessing:
+- Always include `path.name` or `task_id` when logging operations on files or jobs.
+- For retry events, include current attempt and max attempts (e.g. `attempt %d/%d`).
 
-<!-- Sensitive data, PII, secrets -->
+### 3. Mask Sensitive Information
+- API tokens (e.g. `paddleocr_access_token`, OpenAI keys) must **never** be logged in plain text.
+- If tokens must be logged for debugging, display only the first 4 and last 4 characters with masking (e.g. `sk-ab...12cd`).
 
-(To be filled by the team)
+### 4. Web Server Logging (`web.py`)
+- The embedded `InvoiceAgentHandler` inherits from `BaseHTTPRequestHandler`, which prints access logs to `sys.stderr` by default.
+- Prefer overriding `log_message(self, format, *args)` to route requests to the structured `invoice_agent.web` logger or suppress spam during periodic client polling (`/tasks/<id>`).
