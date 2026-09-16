@@ -12,6 +12,8 @@ invoice_agent_config.json
 
 # 临时文件
 tmp_ui_check/
+*.log
+server.log
 
 # Python 缓存
 __pycache__/
