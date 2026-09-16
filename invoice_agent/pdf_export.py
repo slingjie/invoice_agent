@@ -33,8 +33,12 @@ def find_excel_executable() -> Path | None:
     return next((path for path in candidates if path.exists()), None)
 
 
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
 def export_company_pdf(xlsx_path: Path, pdf_path: Path, timeout_seconds: int = 90) -> PdfExportResult:
-    if os.name != "nt" or find_excel_executable() is None:
+    if not is_windows() or find_excel_executable() is None:
         return PdfExportResult(
             status="skipped",
             path=pdf_path,

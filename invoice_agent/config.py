@@ -22,6 +22,9 @@ class AgentConfig:
     retry_base_delay_seconds: float = 1.0
     fallback_api_url: str = ""
     request_timeout_seconds: int = 60
+    enable_mineru_fallback: bool = False
+    mineru_skill_script: str = ""
+    mineru_timeout_seconds: int = 300
 
 
 def load_agent_config(path: Optional[Path]) -> AgentConfig:
@@ -71,5 +74,14 @@ def load_agent_config(path: Optional[Path]) -> AgentConfig:
         ).strip(),
         request_timeout_seconds=int(
             data.get("request_timeout_seconds") or data.get("REQUEST_TIMEOUT_SECONDS") or 60
+        ),
+        enable_mineru_fallback=bool(
+            data.get("enable_mineru_fallback") or data.get("ENABLE_MINERU_FALLBACK") or False
+        ),
+        mineru_skill_script=str(
+            data.get("mineru_skill_script") or data.get("MINERU_SKILL_SCRIPT") or ""
+        ).strip(),
+        mineru_timeout_seconds=int(
+            data.get("mineru_timeout_seconds") or data.get("MINERU_TIMEOUT_SECONDS") or 300
         ),
     )

@@ -31,6 +31,12 @@ __pycache__/
 # 系统文件
 Thumbs.db
 .DS_Store
+*.swp
+*冲突副本*
+
+# 用户发票数据与本地生成目录
+公司报销整理/
+新建文件夹/
 
 # WorkBuddy 内部数据
 .workbuddy/
@@ -40,6 +46,8 @@ Thumbs.db
 .claude/
 .codegraph/
 .codex/
+.opencode/
+.superpowers/
 .playwright-mcp/
 .pytest_tmp/
 

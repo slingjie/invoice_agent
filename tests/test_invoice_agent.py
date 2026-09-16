@@ -25,7 +25,7 @@ from invoice_agent.extractor import extract_fields_from_text
 from invoice_agent.excel import build_preview, write_workbook
 from invoice_agent.models import ExpenseRecord, ParsedDocument, TripInfo
 from invoice_agent.ocr import PaddleAsyncOcrProvider, SdkOcrProvider
-from invoice_agent.pipeline import analyze_records, export_records, organize_batch_subfolders, organize_folder, resolve_trip_info
+from invoice_agent.pipeline import _record_from_parsed, analyze_records, export_records, organize_batch_subfolders, organize_folder, resolve_trip_info
 from invoice_agent.trip_audit import TripAuditPolicy, run_trip_audit
 from invoice_agent.web import (
     TASKS,
@@ -37,6 +37,8 @@ from invoice_agent.web import (
     render_index,
     request_task_stop,
     request_task_terminate,
+    retry_failed_task_records,
+    retry_task_record,
     run_organize_from_form,
     update_task_record,
 )
@@ -131,6 +133,64 @@ class BlockingSecondPackageProvider(FakeOcrProvider):
             self.started_second.set()
             self.release_second.wait(timeout=2)
         return super().parse(path)
+
+
+class RetrySuccessProvider:
+    def __init__(self):
+        self.calls = []
+
+    def parse(self, path: Path) -> ParsedDocument:
+        self.calls.append(path.name)
+        return ParsedDocument(
+            source_path=path,
+            raw_text="重试识别成功 发票号码 INV-RETRY 价税合计 99.00",
+            raw_result={"retry": True},
+            fields={
+                "document_type": "网约车发票",
+                "issue_date": "2026-03-03",
+                "invoice_number": "INV-RETRY",
+                "seller_name": "重试成功服务商",
+                "buyer_name": "杭州勤合能源科技有限公司",
+                "total_with_tax": "99.00",
+                "description": "重试识别",
+            },
+            ok=True,
+        )
+
+
+class RetryFailProvider:
+    def parse(self, path: Path) -> ParsedDocument:
+        return ParsedDocument(
+            source_path=path,
+            raw_text="",
+            raw_result={},
+            fields={},
+            ok=False,
+            error={"code": "SDK_ERROR", "message": "TimeoutError: Timed out after 120s"},
+        )
+
+
+class MinerUSuccessProvider:
+    def __init__(self, script_path=None, timeout_seconds=300):
+        self.script_path = script_path
+        self.timeout_seconds = timeout_seconds
+
+    def parse(self, path: Path) -> ParsedDocument:
+        return ParsedDocument(
+            source_path=path,
+            raw_text="MinerU 兜底成功 发票号码 INV-MINERU 价税合计 66.00",
+            raw_result={"provider": "mineru_fallback"},
+            fields={
+                "document_type": "网约车发票",
+                "issue_date": "2026-03-04",
+                "invoice_number": "INV-MINERU",
+                "seller_name": "MinerU服务商",
+                "buyer_name": "杭州勤合能源科技有限公司",
+                "total_with_tax": "66.00",
+                "description": "MinerU兜底",
+            },
+            ok=True,
+        )
 
 
 class BlockingRecordingProvider(FakeOcrProvider):
@@ -530,7 +590,8 @@ def test_build_preview_includes_review_cards_and_lightweight_overview(tmp_path: 
         description="杭州-上海",
     )
     record.sequence = 1
-    record.high_level_category = "市区交通费"
+    record.reimbursement_category = "市区交通费"
+    record.high_level_category = "交通费"
     record.buyer_name = "杭州勤合能源科技有限公司"
     record.risk_note = "建议人工确认"
 
@@ -543,7 +604,8 @@ def test_build_preview_includes_review_cards_and_lightweight_overview(tmp_path: 
             "原文件名": "invoice.pdf",
             "凭证日期": "2026-03-01",
             "凭证类别": "网约车发票",
-            "报销大类": "市区交通费",
+            "细分类别": "市区交通费",
+            "报销大类": "交通费",
             "价税合计": 88.0,
             "是否计入金额": "是",
             "发票号码": "invoice.pdf",
@@ -551,6 +613,9 @@ def test_build_preview_includes_review_cards_and_lightweight_overview(tmp_path: 
             "购方名称": "杭州勤合能源科技有限公司",
             "起点": "",
             "终点": "",
+            "发车时间": "",
+            "退票费": "",
+            "改签费": "",
             "行程/住宿说明": "杭州-上海",
             "风险提示": "建议人工确认",
         }
@@ -560,7 +625,8 @@ def test_build_preview_includes_review_cards_and_lightweight_overview(tmp_path: 
             "序号": 1,
             "日期": "2026-03-01",
             "凭证类别": "网约车发票",
-            "报销大类": "市区交通费",
+            "细分类别": "市区交通费",
+            "报销大类": "交通费",
             "金额": 88.0,
             "是否计入": "是",
             "风险": "建议人工确认",
@@ -571,6 +637,7 @@ def test_build_preview_includes_review_cards_and_lightweight_overview(tmp_path: 
         "序号",
         "日期",
         "凭证类别",
+        "细分类别",
         "报销大类",
         "金额",
         "是否计入",
@@ -708,7 +775,7 @@ def test_organize_folder_generates_preview_without_copying(tmp_path: Path):
     assert "发票代码" not in main_headers
     assert main_headers[8] == "报销大类"
     main_rows = list(main.iter_rows(min_row=2, values_only=True))
-    rows_by_name = {row[19]: row for row in main_rows if row[0] != "合计总金额"}
+    rows_by_name = {row[22]: row for row in main_rows if row[0] != "合计总金额"}
     assert rows_by_name["invoice.pdf"][8] == "交通费"
     assert rows_by_name["duplicate.pdf"][8] in {None, ""}
     assert rows_by_name["trip.pdf"][8] in {None, ""}
@@ -723,15 +790,17 @@ def test_organize_folder_generates_preview_without_copying(tmp_path: Path):
         "行程交通费",
         "住宿费",
         "市区交通费",
-        "通行费",
         "过路费",
         "油费",
         "退改费",
+        "餐饮费",
+        "办公费",
+        "材料费",
         "其他费用",
         "出差餐补",
         "合计总金额",
     ]
-    assert summary_rows["通行费"] == (88.0, 1)
+    assert summary_rows["市区交通费"] == (88.0, 1)
     assert summary_rows["行程交通费"] == (0.0, 0)
     assert summary_rows["出差餐补"] == (150.0, 0)
     assert summary_rows["合计总金额"] == (238.0, 1)
@@ -826,8 +895,10 @@ def test_batch_mode_continues_when_one_package_missing_trip_info(tmp_path: Path)
 def test_category_summary_uses_fixed_reimbursement_categories(tmp_path: Path):
     records = [
         make_record(tmp_path, "train.pdf", "高铁发票", "10.00"),
+        make_record(tmp_path, "flight.pdf", "普票", "80.00", description="航班机票"),
         make_record(tmp_path, "hotel.pdf", "住宿发票", "20.00"),
         make_record(tmp_path, "didi.pdf", "网约车发票", "30.00"),
+        make_record(tmp_path, "metro.pdf", "普票", "25.00", description="地铁乘车"),
         make_record(tmp_path, "toll.pdf", "通行费发票", "40.00"),
         make_record(tmp_path, "fuel.pdf", "普票", "50.00", seller_name="中国石化销售有限公司"),
         make_record(tmp_path, "refund.pdf", "高铁发票", "60.00", description="退票费"),
@@ -849,24 +920,41 @@ def test_category_summary_uses_fixed_reimbursement_categories(tmp_path: Path):
     workbook = load_workbook(tmp_path / "summary.xlsx", data_only=True)
     rows = {row[0]: (float(row[1]), row[2]) for row in workbook["类别汇总"].iter_rows(min_row=2, values_only=True)}
     assert rows == {
-        "行程交通费": (10.0, 1),
+        "行程交通费": (90.0, 2),
         "住宿费": (20.0, 1),
-        "市区交通费": (0.0, 0),
-        "通行费": (30.0, 1),
+        "市区交通费": (55.0, 2),
         "过路费": (40.0, 1),
         "油费": (50.0, 1),
         "退改费": (60.0, 1),
-        "其他费用": (70.0, 1),
+        "餐饮费": (70.0, 1),
+        "办公费": (0.0, 0),
+        "材料费": (0.0, 0),
+        "其他费用": (0.0, 0),
         "出差餐补": (500.0, 0),
-        "合计总金额": (780.0, 7),
+        "合计总金额": (885.0, 9),
     }
 
     preview_rows = {
         row["报销大类"]: (row["计入金额合计"], row["张数"])
         for row in build_preview(records)["summary_rows"]
     }
+    assert {record.original_name: record.high_level_category for record in records} == {
+        "train.pdf": "交通费",
+        "flight.pdf": "交通费",
+        "hotel.pdf": "差旅费",
+        "didi.pdf": "交通费",
+        "metro.pdf": "交通费",
+        "toll.pdf": "交通费",
+        "fuel.pdf": "交通费",
+        "refund.pdf": "交通费",
+        "meal.pdf": "餐饮费",
+    }
+    company_data = build_company_reimbursement_data(records)
+    assert [row.kind for row in company_data.travel_rows] == ["intercity", "intercity", "city", "city"]
+    assert len(company_data.detail_sections["餐饮费"]) == 1
+    assert any(line.purpose == "住宿费" for line in company_data.detail_sections["差旅费"])
     assert preview_rows["出差餐补"] == (500.0, 0)
-    assert preview_rows["合计总金额"] == (780.0, 7)
+    assert preview_rows["合计总金额"] == (885.0, 9)
 
 
 def test_chinese_currency_uppercase():
@@ -1015,6 +1103,7 @@ def test_pdf_export_skips_when_excel_unavailable(monkeypatch, tmp_path: Path):
 
 
 def test_pdf_export_reports_subprocess_failure(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(pdf_export, "is_windows", lambda: True)
     monkeypatch.setattr(pdf_export, "find_excel_executable", lambda: Path("EXCEL.EXE"))
     monkeypatch.setattr(
         pdf_export.subprocess,
@@ -1214,6 +1303,9 @@ def test_load_agent_config_reads_local_paddleocr_settings(tmp_path: Path):
                 "llm_base_url": "https://llm.example.com/v1",
                 "llm_model": "compatible-model",
                 "llm_api_key_env": "INVOICE_AGENT_LLM_API_KEY",
+                "enable_mineru_fallback": True,
+                "mineru_skill_script": "C:/tools/mineru.py",
+                "mineru_timeout_seconds": 240,
             }
         ),
         encoding="utf-8",
@@ -1230,6 +1322,39 @@ def test_load_agent_config_reads_local_paddleocr_settings(tmp_path: Path):
     assert config.llm_base_url == "https://llm.example.com/v1"
     assert config.llm_model == "compatible-model"
     assert config.llm_api_key_env == "INVOICE_AGENT_LLM_API_KEY"
+    assert config.enable_mineru_fallback is True
+    assert config.mineru_skill_script == "C:/tools/mineru.py"
+    assert config.mineru_timeout_seconds == 240
+
+
+def test_mineru_fallback_provider_extracts_fields_from_markdown(tmp_path: Path):
+    from invoice_agent.mineru_fallback import MinerUFallbackProvider
+
+    script = tmp_path / "mineru.py"
+    script.write_text(
+        "print('增值税电子普通发票 发票号码 INV-MINERU 价税合计 66.00 开票日期 2026年03月04日')\n",
+        encoding="utf-8",
+    )
+    pdf = tmp_path / "invoice.pdf"
+    write_file(pdf, b"pdf")
+
+    doc = MinerUFallbackProvider(script_path=script, timeout_seconds=5).parse(pdf)
+
+    assert doc.ok is True
+    assert doc.raw_result["provider"] == "mineru_fallback"
+    assert "INV-MINERU" in doc.raw_text
+
+
+def test_mineru_fallback_provider_reports_missing_script(tmp_path: Path):
+    from invoice_agent.mineru_fallback import MinerUFallbackProvider
+
+    pdf = tmp_path / "invoice.pdf"
+    write_file(pdf, b"pdf")
+
+    doc = MinerUFallbackProvider(script_path=tmp_path / "missing.py").parse(pdf)
+
+    assert doc.ok is False
+    assert doc.error["code"] == "CONFIG_ERROR"
 
 
 def test_async_paddle_provider_submits_all_jobs_before_polling(tmp_path: Path):
@@ -1277,6 +1402,157 @@ def test_sdk_provider_catches_sdk_errors_gracefully(tmp_path: Path, monkeypatch)
     assert docs[0].ok is False
 
 
+def test_sdk_provider_error_message_includes_exception_type_for_blank_errors(tmp_path: Path, monkeypatch):
+    class BlankMessageError(Exception):
+        def __str__(self):
+            return ""
+
+    class APIError(Exception):
+        status_code = 500
+
+    class RateLimitError(Exception):
+        pass
+
+    class FailingAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def parse_document(self, file_path):
+            raise BlankMessageError()
+
+    path = tmp_path / "invoice.pdf"
+    write_file(path, b"pdf")
+    monkeypatch.setitem(sys.modules, "paddleocr", types.SimpleNamespace(AsyncPaddleOCRClient=FailingAsyncClient))
+    monkeypatch.setitem(sys.modules, "paddleocr._api_client", types.SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr._api_client.errors",
+        types.SimpleNamespace(APIError=APIError, RateLimitError=RateLimitError),
+    )
+
+    docs = SdkOcrProvider(access_token="token").parse_many([path])
+
+    assert docs[0].ok is False
+    assert docs[0].error["message"].startswith("BlankMessageError:")
+
+
+def test_sdk_provider_retries_transient_timeout_errors(tmp_path: Path, monkeypatch):
+    class APIError(Exception):
+        status_code = 500
+
+    class RateLimitError(Exception):
+        pass
+
+    class FakePage:
+        markdown_text = "电子发票 发票号码：INVRETRY001 开票日期：2026年03月01日 价税合计（小写）￥12.00"
+
+    class FakeResult:
+        job_id = "job-timeout-retry"
+        pages = [FakePage()]
+
+    class FlakyAsyncClient:
+        attempts = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def parse_document(self, file_path):
+            FlakyAsyncClient.attempts += 1
+            if FlakyAsyncClient.attempts == 1:
+                raise TimeoutError()
+            return FakeResult()
+
+    async def no_sleep(delay):
+        return None
+
+    path = tmp_path / "invoice.pdf"
+    write_file(path, b"pdf")
+    monkeypatch.setitem(sys.modules, "paddleocr", types.SimpleNamespace(AsyncPaddleOCRClient=FlakyAsyncClient))
+    monkeypatch.setitem(sys.modules, "paddleocr._api_client", types.SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr._api_client.errors",
+        types.SimpleNamespace(APIError=APIError, RateLimitError=RateLimitError),
+    )
+    monkeypatch.setattr("invoice_agent.ocr.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("invoice_agent.ocr.random.uniform", lambda _low, _high: 1.0)
+
+    docs = SdkOcrProvider(access_token="token").parse_many([path])
+
+    assert FlakyAsyncClient.attempts == 2
+    assert docs[0].ok is True
+    assert docs[0].fields["invoice_number"] == "INVRETRY001"
+
+
+def test_sdk_provider_retries_transient_dns_errors(tmp_path: Path, monkeypatch):
+    class APIError(Exception):
+        status_code = 500
+
+    class RateLimitError(Exception):
+        pass
+
+    class FakePage:
+        markdown_text = "电子发票 发票号码：DNSRETRY001 开票日期：2026年07月10日 价税合计（小写）￥88.00"
+
+    class FakeResult:
+        job_id = "job-dns-retry"
+        pages = [FakePage()]
+
+    class ClientConnectorDNSError(Exception):
+        pass
+
+    class FlakyAsyncClient:
+        attempts = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def parse_document(self, file_path):
+            FlakyAsyncClient.attempts += 1
+            if FlakyAsyncClient.attempts == 1:
+                raise ClientConnectorDNSError("getaddrinfo failed")
+            return FakeResult()
+
+    async def no_sleep(delay):
+        return None
+
+    path = tmp_path / "invoice.pdf"
+    write_file(path, b"pdf")
+    monkeypatch.setitem(sys.modules, "paddleocr", types.SimpleNamespace(AsyncPaddleOCRClient=FlakyAsyncClient))
+    monkeypatch.setitem(sys.modules, "paddleocr._api_client", types.SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "paddleocr._api_client.errors",
+        types.SimpleNamespace(APIError=APIError, RateLimitError=RateLimitError),
+    )
+    monkeypatch.setattr("invoice_agent.ocr.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("invoice_agent.ocr.random.uniform", lambda _low, _high: 1.0)
+
+    docs = SdkOcrProvider(access_token="token").parse_many([path])
+
+    assert FlakyAsyncClient.attempts == 2
+    assert docs[0].ok is True
+    assert docs[0].fields["invoice_number"] == "DNSRETRY001"
+
+
 def test_extracts_train_ticket_amount_and_travel_date():
     fields = extract_fields_from_text(
         "电子发票（铁路电子客票） 发票号码：26329116804002389322 "
@@ -1286,8 +1562,35 @@ def test_extracts_train_ticket_amount_and_travel_date():
     )
 
     assert fields["document_type"] == "高铁发票"
-    assert fields["issue_date"] == "2026-03-06"
+    assert fields["issue_date"] == "2026-03-13"
+    assert fields["travel_date"] == "2026-03-06"
+    assert fields["train_departure_time"] == "19:54"
     assert fields["total_with_tax"] == "130.00"
+
+
+def test_train_travel_date_drives_audit_and_company_reimbursement_dates(tmp_path: Path):
+    fields = extract_fields_from_text(
+        "电子发票（铁路电子客票） 发票号码：26329116804002389322 "
+        "开票日期：2026年03月13日 南京南站 G7629 杭州东站 "
+        "2026年03月06日 19:54开 票价：￥130.00",
+        Path("train.pdf"),
+    )
+    record = _record_from_parsed(
+        tmp_path / "train.pdf",
+        TripInfo("项目", "张三", "技术部", "2026-03-06", "2026-03-07"),
+        ParsedDocument(tmp_path / "train.pdf", "", {}, fields, True),
+        file_hash="train",
+    )
+    analyze_records([record])
+    company_data = build_company_reimbursement_data([record])
+
+    assert record.document_date == "2026-03-06"
+    assert record.recognition_status == "已识别"
+    assert company_data.travel_rows[0].date_text == "2026-03-06"
+    assert company_data.detail_sections["交通费"][0].date_text == "2026-03-06"
+    output = tmp_path / "company.xlsx"
+    write_company_workbook(output, company_data)
+    assert load_workbook(output, data_only=False)["差旅费报销单"]["B6"].value == "2026-03-06"
 
 
 def test_extracts_train_parties_and_route_from_ocr_text():
@@ -1312,7 +1615,31 @@ def test_extracts_train_parties_and_route_from_ocr_text():
     assert fields["buyer_name"] == "杭州勤合能源科技有限公司"
     assert fields["origin"] == "南京南站"
     assert fields["destination"] == "蚌埠南站"
+    assert fields["train_departure_time"] == "12:45"
     assert fields["description"] == "南京南站-蚌埠南站"
+
+
+def test_extracts_train_refund_and_change_fees():
+    refund = extract_fields_from_text(
+        "电子发票（铁路电子客票） 发票号码：26329116804002389323 "
+        "开票日期：2026年03月13日 南京南站 G7629 杭州东站 "
+        "2026年03月06日 19:54开 退票费：￥20.00",
+        Path("退票费-南京南站→杭州东站.pdf"),
+    )
+    changed = extract_fields_from_text(
+        "电子发票（铁路电子客票） 发票号码：26329116804002389324 "
+        "开票日期：2026年03月14日 南京南站 G7629 杭州东站 "
+        "2026年03月06日 19:54开 改签费：￥12.50",
+        Path("改签费-南京南站→杭州东站.pdf"),
+    )
+
+    assert refund["document_type"] == "高铁发票"
+    assert refund["refund_fee"] == "20.00"
+    assert refund["change_fee"] == ""
+    assert refund["total_with_tax"] == "20.00"
+    assert changed["change_fee"] == "12.50"
+    assert changed["refund_fee"] == ""
+    assert changed["total_with_tax"] == "12.50"
 
 
 def test_extracts_didi_itinerary_route_from_table():
@@ -1356,6 +1683,26 @@ def test_extracts_itinerary_total_amount():
     assert didi["total_with_tax"] == "74.00"
     assert toll["document_type"] == "行程单"
     assert toll["total_with_tax"] == "110.00"
+
+
+def test_detects_common_expense_invoice_types_and_categories(tmp_path: Path):
+    cases = [
+        ("地铁乘车服务 价税合计 12.00", "metro.pdf", "公交地铁票", "市区交通费", "交通费"),
+        ("停车服务 价税合计 8.00", "parking.pdf", "停车费发票", "市区交通费", "交通费"),
+        ("办公用品 文具 价税合计 20.00", "office.pdf", "办公发票", "办公费", "办公费"),
+        ("项目材料 配件 价税合计 30.00", "material.pdf", "材料发票", "材料费", "材料费"),
+        ("会议培训服务 价税合计 40.00", "meeting.pdf", "会议培训发票", "其他费用", "其他"),
+        ("房屋租赁服务 价税合计 50.00", "rental.pdf", "租赁发票", "其他费用", "其他"),
+    ]
+    records = []
+    for text, name, document_type, _, _ in cases:
+        fields = extract_fields_from_text(text, Path(name))
+        assert fields["document_type"] == document_type
+        records.append(make_record(tmp_path, name, fields["document_type"], "10.00", description=text))
+    analyze_records(records)
+    assert [(record.reimbursement_category, record.high_level_category) for record in records] == [
+        (fine, high) for _, _, _, fine, high in cases
+    ]
 
 
 def test_route_extraction_ignores_dates_and_plain_hyphens():
@@ -1478,6 +1825,22 @@ def test_frontend_renders_pdf_previews_with_image_lightbox():
     assert "saveReviewEdits" in js
 
 
+def test_frontend_exposes_failed_invoice_retry_controls():
+    js = Path("invoice_agent/static/app.js").read_text(encoding="utf-8")
+
+    for field in [
+        "retryFailedButton",
+        "retryRecord(",
+        "retryFailedRecords(",
+        "/retry-failed",
+        "/retry",
+        "重新识别",
+        "重试全部失败文件",
+        "MinerU",
+    ]:
+        assert field in js
+
+
 def test_ui_page_contains_required_form_fields():
     page = render_index()
     css = Path("invoice_agent/static/app.css").read_text(encoding="utf-8")
@@ -1485,7 +1848,7 @@ def test_ui_page_contains_required_form_fields():
 
     for field in [
         '<link rel="stylesheet" href="/static/app.css?v=task-cancellation-v1">',
-        '<script src="/static/app.js?v=task-cancellation-v1" defer></script>',
+            '<script src="/static/app.js?v=review-category-v1" defer></script>',
         'data-initial-task-id=""',
         'data-task-state="idle"',
         'class="app-shell"',
@@ -1673,7 +2036,7 @@ def test_web_flow_previews_before_exporting_excel(tmp_path: Path, monkeypatch):
     assert not (out_dir / "00_报销清单.xlsx").exists()
     assert task["preview"]["main_rows"][0]["原文件名"] == "invoice.pdf"
     assert task["preview"]["main_rows"][0]["报销大类"] == "交通费"
-    assert task["preview"]["summary_rows"][3]["报销大类"] == "通行费"
+    assert task["preview"]["summary_rows"][2]["报销大类"] == "市区交通费"
     assert task["preview"]["summary_rows"][-1]["报销大类"] == "合计总金额"
     assert task["preview"]["trip_audit_rows"]
     assert task["preview"]["main_rows"][-1]["序号"] == "合计总金额"
@@ -1922,6 +2285,9 @@ def test_review_edits_update_preview_raw_results_and_exported_excel(tmp_path: Pa
             "buyer_name": "杭州勤合能源科技有限公司",
             "origin": "南京",
             "destination": "杭州",
+            "train_departure_time": "09:15",
+            "refund_fee": "8.00",
+            "change_fee": "6.00",
             "description": "住宿校对",
             "risk_note": "",
         },
@@ -1930,10 +2296,16 @@ def test_review_edits_update_preview_raw_results_and_exported_excel(tmp_path: Pa
     edited = TASKS["task-edit"]["_records"][0]
     assert edited.total_with_tax == "99.50"
     assert edited.document_type == "住宿发票"
-    assert edited.high_level_category == "住宿费"
+    assert edited.reimbursement_category == "住宿费"
+    assert edited.high_level_category == "差旅费"
+    assert edited.train_departure_time == "09:15"
+    assert edited.refund_fee == "8.00"
+    assert edited.change_fee == "6.00"
     assert "INV-EDIT" in edited.new_name
     assert response["preview"]["review_cards"][0]["价税合计"] == 99.5
-    assert response["preview"]["summary_rows"][3] == {"报销大类": "通行费", "计入金额合计": 99.5, "张数": 1}
+    assert response["preview"]["review_cards"][0]["细分类别"] == "住宿费"
+    assert response["preview"]["review_cards"][0]["报销大类"] == "差旅费"
+    assert response["preview"]["summary_rows"][1] == {"报销大类": "住宿费", "计入金额合计": 99.5, "张数": 1}
     assert TASKS["task-edit"]["files"][0]["amount"] == "99.50"
     raw_results = json.loads((out_dir / "raw_results.json").read_text(encoding="utf-8"))
     assert raw_results[0]["total_with_tax"] == "99.50"
@@ -1945,7 +2317,7 @@ def test_review_edits_update_preview_raw_results_and_exported_excel(tmp_path: Pa
     row = next(workbook["报销清单"].iter_rows(min_row=2, values_only=True))
     assert row[6] == "2026-03-05"
     assert row[7] == "住宿发票"
-    assert row[8] == "住宿费"
+    assert row[8] == "差旅费"
     assert row[10] == "INV-EDIT"
     assert row[11] == "人工校对酒店"
     assert row[15] == 99.5
@@ -1986,11 +2358,296 @@ def test_review_edits_recompute_trip_audit_preview(tmp_path: Path):
     assert any(row["校对类别"] == "市内交通" for row in response["preview"]["trip_audit_rows"])
 
 
+def make_failed_record(tmp_path: Path, name: str = "failed.pdf") -> ExpenseRecord:
+    record = make_record(tmp_path, name, "其他/无法识别", "")
+    record.sequence = 1
+    record.include_in_amount = False
+    record.invoice_number = ""
+    record.seller_name = ""
+    record.total_with_tax = ""
+    record.recognition_status = "无法识别"
+    record.risk_note = "Timed out after 120.0s"
+    return record
+
+
+def test_retry_task_record_replaces_failed_record_and_refreshes_outputs(tmp_path: Path):
+    out_dir = tmp_path / "out"
+    record = make_failed_record(tmp_path, "failed.pdf")
+    provider = RetrySuccessProvider()
+    TASKS["task-retry-one"] = {
+        "id": "task-retry-one",
+        "state": "review",
+        "stage": "等待确认",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "files": [{"path": str(record.source_path), "name": record.original_name, "status": "无法识别", "message": record.risk_note}],
+        "preview": build_preview([record]),
+        "can_export": True,
+        "output_dir": str(out_dir),
+        "excel_path": "",
+        "_records": [record],
+        "_output_dir": out_dir,
+        "_apply": False,
+        "_ocr_provider": provider,
+        "_trip_audit_policy": TripAuditPolicy(),
+    }
+
+    response = retry_task_record("task-retry-one", "1")
+
+    retried = TASKS["task-retry-one"]["_records"][0]
+    assert provider.calls == ["failed.pdf"]
+    assert retried.recognition_status == "已识别"
+    assert retried.invoice_number == "INV-RETRY"
+    assert retried.total_with_tax == "99.00"
+    assert TASKS["task-retry-one"]["state"] == "review"
+    assert TASKS["task-retry-one"]["can_export"] is True
+    assert TASKS["task-retry-one"]["files"][0]["status"] == "已识别"
+    assert TASKS["task-retry-one"]["files"][0]["amount"] == "99.00"
+    assert response["record"]["invoice_number"] == "INV-RETRY"
+    raw_results = json.loads((out_dir / "raw_results.json").read_text(encoding="utf-8"))
+    assert raw_results[0]["invoice_number"] == "INV-RETRY"
+
+
+def test_retry_failed_task_records_only_retries_failed_records(tmp_path: Path):
+    failed = make_failed_record(tmp_path, "failed.pdf")
+    success = make_record(tmp_path, "success.pdf", "网约车发票", "88.00")
+    success.sequence = 2
+    provider = RetrySuccessProvider()
+    TASKS["task-retry-failed"] = {
+        "id": "task-retry-failed",
+        "state": "review",
+        "stage": "等待确认",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "files": [
+            {"path": str(failed.source_path), "name": failed.original_name, "status": "无法识别", "message": failed.risk_note},
+            {"path": str(success.source_path), "name": success.original_name, "status": "已识别", "message": ""},
+        ],
+        "preview": build_preview([failed, success]),
+        "can_export": True,
+        "output_dir": str(tmp_path / "out"),
+        "excel_path": "",
+        "_records": [failed, success],
+        "_output_dir": tmp_path / "out",
+        "_apply": False,
+        "_ocr_provider": provider,
+    }
+
+    response = retry_failed_task_records("task-retry-failed")
+
+    assert provider.calls == ["failed.pdf"]
+    assert response["retried"] == [{"sequence": 1, "name": "failed.pdf", "status": "已识别"}]
+    records_by_name = {record.original_name: record for record in TASKS["task-retry-failed"]["_records"]}
+    assert records_by_name["failed.pdf"].invoice_number == "INV-RETRY"
+    assert records_by_name["success.pdf"].invoice_number == "success.pdf"
+
+
+def test_retry_task_record_rejects_non_retryable_task_states(tmp_path: Path):
+    forbidden_states = ["queued", "running", "stopping", "stopped", "terminating", "terminated", "exporting", "done"]
+    for state in forbidden_states:
+        record = make_failed_record(tmp_path, f"{state}.pdf")
+        task_id = f"task-retry-forbidden-{state}"
+        TASKS[task_id] = {
+            "id": task_id,
+            "state": state,
+            "stage": state,
+            "started_at": time.time(),
+            "updated_at": time.time(),
+            "_records": [record],
+            "_output_dir": tmp_path / "out",
+            "_ocr_provider": RetrySuccessProvider(),
+        }
+
+        with pytest.raises(ValueError, match="not ready"):
+            retry_task_record(task_id, "1")
+
+
+def test_retry_batch_package_record_refreshes_only_that_package(tmp_path: Path):
+    failed = make_failed_record(tmp_path, "failed.pdf")
+    other = make_record(tmp_path, "other.pdf", "网约车发票", "88.00")
+    other.sequence = 1
+    provider = RetrySuccessProvider()
+    TASKS["task-retry-package"] = {
+        "id": "task-retry-package",
+        "mode": "batch_subfolders",
+        "state": "review",
+        "stage": "等待确认",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "packages": [
+            {"id": "pkg-a", "name": "A", "state": "review", "output_dir": str(tmp_path / "out" / "A"), "can_export": True, "preview": build_preview([failed]), "excel_path": ""},
+            {"id": "pkg-b", "name": "B", "state": "review", "output_dir": str(tmp_path / "out" / "B"), "can_export": True, "preview": build_preview([other]), "excel_path": ""},
+        ],
+        "_packages": {
+            "pkg-a": {"records": [failed], "output_dir": tmp_path / "out" / "A", "apply": False, "trip_audit": None, "ocr_provider": provider},
+            "pkg-b": {"records": [other], "output_dir": tmp_path / "out" / "B", "apply": False, "trip_audit": None},
+        },
+        "_ocr_provider": provider,
+    }
+
+    response = retry_task_record("task-retry-package", "1", package_id="pkg-a")
+
+    assert response["record"]["invoice_number"] == "INV-RETRY"
+    assert TASKS["task-retry-package"]["_packages"]["pkg-a"]["records"][0].invoice_number == "INV-RETRY"
+    assert TASKS["task-retry-package"]["_packages"]["pkg-b"]["records"][0].invoice_number == "other.pdf"
+    packages = {package["id"]: package for package in TASKS["task-retry-package"]["packages"]}
+    assert packages["pkg-a"]["preview"]["main_rows"][0]["发票号码"] == "INV-RETRY"
+    assert packages["pkg-b"]["preview"]["main_rows"][0]["发票号码"] == "other.pdf"
+
+
+def test_retry_task_record_keeps_record_failed_when_ocr_still_fails(tmp_path: Path):
+    record = make_failed_record(tmp_path, "failed-again.pdf")
+    TASKS["task-retry-fails"] = {
+        "id": "task-retry-fails",
+        "state": "review",
+        "stage": "等待确认",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "files": [{"path": str(record.source_path), "name": record.original_name, "status": "无法识别", "message": record.risk_note}],
+        "preview": build_preview([record]),
+        "can_export": True,
+        "output_dir": str(tmp_path / "out"),
+        "excel_path": "",
+        "_records": [record],
+        "_output_dir": tmp_path / "out",
+        "_apply": False,
+        "_ocr_provider": RetryFailProvider(),
+    }
+
+    response = retry_task_record("task-retry-fails", "1")
+
+    retried = TASKS["task-retry-fails"]["_records"][0]
+    assert retried.recognition_status == "无法识别"
+    assert retried.risk_note == "TimeoutError: Timed out after 120s"
+    assert response["record"]["risk_note"] == "TimeoutError: Timed out after 120s"
+    assert TASKS["task-retry-fails"]["files"][0]["message"] == "TimeoutError: Timed out after 120s"
+
+
+def test_retry_provider_uses_conservative_timeouts_for_failed_records(monkeypatch):
+    captured = {}
+
+    class CapturingProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("invoice_agent.web.SdkOcrProvider", CapturingProvider)
+    provider = web._retry_provider(
+        {
+            "_ocr_provider_config": {
+                "access_token": "token",
+                "timeout_seconds": 120,
+                "request_timeout_seconds": 60,
+            }
+        },
+        None,
+    )
+
+    assert isinstance(provider, CapturingProvider)
+    assert captured["timeout_seconds"] == 300
+    assert captured["request_timeout_seconds"] == 180
+
+
+def test_retry_provider_preserves_higher_configured_timeouts(monkeypatch):
+    captured = {}
+
+    class CapturingProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("invoice_agent.web.SdkOcrProvider", CapturingProvider)
+    provider = web._retry_provider(
+        {
+            "_ocr_provider_config": {
+                "access_token": "token",
+                "timeout_seconds": 600,
+                "request_timeout_seconds": 240,
+            }
+        },
+        None,
+    )
+
+    assert isinstance(provider, CapturingProvider)
+    assert captured["timeout_seconds"] == 600
+    assert captured["request_timeout_seconds"] == 240
+
+
+def test_retry_task_record_uses_mineru_fallback_for_failed_pdf(tmp_path: Path, monkeypatch):
+    record = make_failed_record(tmp_path, "failed-mineru.pdf")
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr("invoice_agent.web.MinerUFallbackProvider", MinerUSuccessProvider)
+    TASKS["task-retry-mineru"] = {
+        "id": "task-retry-mineru",
+        "state": "review",
+        "stage": "等待确认",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "files": [{"path": str(record.source_path), "name": record.original_name, "status": "无法识别", "message": record.risk_note}],
+        "preview": build_preview([record]),
+        "can_export": True,
+        "output_dir": str(out_dir),
+        "excel_path": "",
+        "_records": [record],
+        "_output_dir": out_dir,
+        "_apply": False,
+        "_ocr_provider": RetryFailProvider(),
+        "_mineru_fallback_config": {
+            "enabled": True,
+            "script_path": "C:/tools/mineru.py",
+            "timeout_seconds": 240,
+        },
+        "_trip_audit_policy": TripAuditPolicy(),
+    }
+
+    response = retry_task_record("task-retry-mineru", "1")
+
+    retried = TASKS["task-retry-mineru"]["_records"][0]
+    assert retried.recognition_status == "已识别"
+    assert retried.invoice_number == "INV-MINERU"
+    assert retried.raw_result["provider"] == "mineru_fallback"
+    assert "MinerU兜底解析" in retried.risk_note
+    assert response["record"]["invoice_number"] == "INV-MINERU"
+    raw_results = json.loads((out_dir / "raw_results.json").read_text(encoding="utf-8"))
+    assert raw_results[0]["invoice_number"] == "INV-MINERU"
+
+
+def test_retry_task_record_skips_mineru_fallback_for_non_pdf(tmp_path: Path, monkeypatch):
+    record = make_failed_record(tmp_path, "failed-image.png")
+
+    class RaisingMinerUProvider:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("MinerU should not be constructed for non-PDF retry")
+
+    monkeypatch.setattr("invoice_agent.web.MinerUFallbackProvider", RaisingMinerUProvider)
+    TASKS["task-retry-mineru-skip-image"] = {
+        "id": "task-retry-mineru-skip-image",
+        "state": "review",
+        "stage": "等待确认",
+        "started_at": time.time(),
+        "updated_at": time.time(),
+        "files": [{"path": str(record.source_path), "name": record.original_name, "status": "无法识别", "message": record.risk_note}],
+        "preview": build_preview([record]),
+        "can_export": True,
+        "output_dir": str(tmp_path / "out"),
+        "excel_path": "",
+        "_records": [record],
+        "_output_dir": tmp_path / "out",
+        "_apply": False,
+        "_ocr_provider": RetryFailProvider(),
+        "_mineru_fallback_config": {"enabled": True, "script_path": "C:/tools/mineru.py", "timeout_seconds": 240},
+    }
+
+    response = retry_task_record("task-retry-mineru-skip-image", "1")
+
+    assert response["record"]["recognition_status"] == "无法识别"
+    assert response["record"]["risk_note"] == "TimeoutError: Timed out after 120s"
+
+
 def test_web_review_progress_rows_include_final_risk_messages(tmp_path: Path, monkeypatch):
     src = tmp_path / "上海出差"
     write_file(src / "invoice.pdf", b"invoice")
     write_file(src / "duplicate.pdf", b"invoice")
-    out_dir = tmp_path / "out"
+    output_pdf = src / f"整理结果_上海出差_{date.today():%Y%m%d}" / "01_公司报销单.pdf"
+    write_file(output_pdf, b"exported-pdf")
     task_id = "task-risk-progress"
     TASKS[task_id] = {
         "id": task_id,
@@ -2007,7 +2664,6 @@ def test_web_review_progress_rows_include_final_risk_messages(tmp_path: Path, mo
     }
     form = {
         "folder": str(src),
-        "out_dir": str(out_dir),
         "traveler": "张三",
         "department": "技术部",
         "trip_start_date": "2026-03-01",
@@ -2040,6 +2696,50 @@ def test_web_review_progress_rows_include_final_risk_messages(tmp_path: Path, mo
     assert "Hash重复" in messages["invoice.pdf"]
     assert "Hash重复" in messages["duplicate.pdf"]
     assert "重复发票不计入汇总" in messages["duplicate.pdf"]
+    assert TASKS[task_id]["total"] == 2
+    assert "01_公司报销单.pdf" not in messages
+
+
+def test_initialize_task_files_excludes_existing_output_pdf(tmp_path: Path):
+    source = tmp_path / "上海出差"
+    output_dir = source / "整理结果"
+    write_file(source / "invoice.pdf", b"invoice")
+    write_file(output_dir / "01_公司报销单.pdf", b"exported-pdf")
+    task_id = "task-exclude-output-pdf"
+    TASKS[task_id] = {"id": task_id, "files": [], "total": 0, "completed": 0}
+
+    web.initialize_task_files(task_id, source, output_dir)
+
+    assert TASKS[task_id]["total"] == 1
+    assert [row["name"] for row in TASKS[task_id]["files"]] == ["invoice.pdf"]
+    assert TASKS[task_id]["files"][0]["status"] == "等待中"
+
+
+def test_initialize_task_files_keeps_input_files_when_output_dir_is_parent(tmp_path: Path):
+    source = tmp_path / "报销" / "福州六和"
+    write_file(source / "invoice.pdf", b"invoice")
+    task_id = "task-output-parent"
+    TASKS[task_id] = {"id": task_id, "files": [], "total": 0, "completed": 0}
+
+    web.initialize_task_files(task_id, source, source.parent)
+
+    assert TASKS[task_id]["total"] == 1
+    assert [row["name"] for row in TASKS[task_id]["files"]] == ["invoice.pdf"]
+
+
+def test_organize_folder_keeps_input_files_when_output_dir_is_parent(tmp_path: Path):
+    source = tmp_path / "报销" / "福州六和"
+    write_file(source / "invoice.pdf", b"invoice")
+
+    result = organize_folder(
+        source,
+        trip_info=TripInfo("福州六和", "张三", "售前", "2026-07-14", "2026-07-16"),
+        out_dir=source.parent,
+        ocr_provider=FakeOcrProvider(),
+        write_excel=False,
+    )
+
+    assert [record.original_name for record in result.records] == ["invoice.pdf"]
 
 
 def test_choose_path_rejects_unknown_kind():

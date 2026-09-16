@@ -418,6 +418,24 @@ class SdkOcrProvider:
             return True
         if isinstance(exc, APIError) and exc.status_code == 429:
             return True
+        if isinstance(exc, TimeoutError):
+            return True
+        message = f"{type(exc).__name__}: {exc!r}".lower()
+        retryable_fragments = [
+            "clientconnectorerror",
+            "clientconnectordnserror",
+            "clientpayloaderror",
+            "connectionreseterror",
+            "connectionabortederror",
+            "contentlengtherror",
+            "getaddrinfo failed",
+            "ssl handshake",
+            "not enough data",
+            "timed out",
+            "timeout",
+        ]
+        if any(fragment in message for fragment in retryable_fragments):
+            return True
         return False
 
     def __init__(
@@ -496,13 +514,15 @@ class SdkOcrProvider:
                                 )
                                 delay *= random.uniform(0.5, 1.5)
                                 logger.warning(
-                                    "SDK rate limited for %s (attempt %d/%d), retrying in %.1fs",
+                                    "SDK transient error for %s (attempt %d/%d), retrying in %.1fs: %s",
                                     path.name, attempt + 1, self._RETRY_MAX, delay,
+                                    f"{type(exc).__name__}: {exc!r}",
                                 )
                                 await asyncio.sleep(delay)
                                 continue
-                            logger.warning("SDK parse failed for %s: %s", path.name, exc)
-                            return _error_document(path, {"code": "SDK_ERROR", "message": str(exc)})
+                            message = f"{type(exc).__name__}: {exc!r}"
+                            logger.warning("SDK parse failed for %s: %s", path.name, message)
+                            return _error_document(path, {"code": "SDK_ERROR", "message": message})
 
             results: Dict[Path, ParsedDocument] = {}
             path_iter = iter(paths)

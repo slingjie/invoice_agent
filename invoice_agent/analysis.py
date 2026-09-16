@@ -13,10 +13,12 @@ REIMBURSEMENT_CATEGORIES = [
     "行程交通费",
     "住宿费",
     "市区交通费",
-    "通行费",
     "过路费",
     "油费",
     "退改费",
+    "餐饮费",
+    "办公费",
+    "材料费",
     "其他费用",
     MEAL_ALLOWANCE_CATEGORY,
 ]
@@ -29,6 +31,9 @@ HIGH_LEVEL_CATEGORY_MAP = {
     "油费": "交通费",
     "退改费": "交通费",
     "市区交通费": "交通费",
+    "餐饮费": "餐饮费",
+    "办公费": "办公费",
+    "材料费": "材料费",
 }
 
 HIGH_LEVEL_CATEGORY_KEYWORDS: list[tuple[list[str], str]] = [
@@ -49,20 +54,26 @@ def assign_reimbursement_category(record: ExpenseRecord) -> str:
     )
     if record.document_type == "行程单":
         if _has_any(text, ["滴滴", "网约车", "出租车", "出租汽车", "地铁"]):
-            return "通行费"
+            return "市区交通费"
         if _has_any(text, ["高铁", "铁路", "客票", "机票", "航班"]):
             return "行程交通费"
-        return "通行费"
+        return "市区交通费"
     if _has_any(text, ["退票", "改签", "退改", "退改签"]) and _has_any(text, ["高铁", "铁路", "客票", "火车", "机票", "航班"]):
         return "退改费"
-    if _has_any(text, ["滴滴", "网约车", "出租车", "出租汽车", "地铁"]):
-        return "通行费"
+    if _has_any(text, ["滴滴", "网约车", "出租车", "出租汽车", "地铁", "公交", "公共汽车", "巴士", "停车费", "停车服务"]):
+        return "市区交通费"
     if _has_any(text, ["住宿", "酒店", "宾馆", "旅店"]):
         return "住宿费"
     if _has_any(text, ["油费", "加油", "石油", "石化", "中石油", "中石化"]):
         return "油费"
     if _has_any(text, ["高速", "过路", "路桥", "路网", "车辆通行费", "通行费发票"]):
         return "过路费"
+    if _has_any(text, ["餐饮", "吃饭", "餐厅", "美食", "饮品", "食品", "饭店", "咖啡"]):
+        return "餐饮费"
+    if _has_any(text, ["快递", "配送", "打印", "文印", "晒图", "复印", "印刷", "办公用品", "文具"]):
+        return "办公费"
+    if _has_any(text, ["材料", "配件", "设备"]):
+        return "材料费"
     if _has_any(text, ["市区交通"]):
         return "市区交通费"
     if _has_any(text, ["高铁", "铁路", "客票", "火车", "机票", "航班"]):

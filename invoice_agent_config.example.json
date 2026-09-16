@@ -8,5 +8,8 @@
   "lodging_daily_limit": "",
   "llm_base_url": "",
   "llm_model": "",
-  "llm_api_key_env": "INVOICE_AGENT_LLM_API_KEY"
+  "llm_api_key_env": "INVOICE_AGENT_LLM_API_KEY",
+  "enable_mineru_fallback": false,
+  "mineru_skill_script": "",
+  "mineru_timeout_seconds": 300
 }

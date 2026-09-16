@@ -32,6 +32,18 @@ def scan_documents(folder: Path) -> List[Path]:
     )
 
 
+def is_inside(path: Path, maybe_parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(maybe_parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def is_strict_child(path: Path, maybe_parent: Path) -> bool:
+    return path.resolve() != maybe_parent.resolve() and is_inside(path, maybe_parent)
+
+
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:

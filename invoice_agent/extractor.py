@@ -14,6 +14,13 @@ INVOICE_TYPES = {
     "出租车票",
     "通行费发票",
     "餐饮发票",
+    "公交地铁票",
+    "停车费发票",
+    "快递发票",
+    "办公发票",
+    "材料发票",
+    "会议培训发票",
+    "租赁发票",
     "专用发票",
     "普票",
     "纸质拍照发票",
@@ -90,10 +97,24 @@ def detect_document_type(text: str, path: Path) -> str:
         return "高铁发票"
     if re.search(r"出租车|出租汽车", merged):
         return "出租车票"
+    if re.search(r"地铁|公交|公共汽车|巴士", merged):
+        return "公交地铁票"
+    if re.search(r"停车费|停车服务", merged):
+        return "停车费发票"
     if re.search(r"通行费|高速|路网", merged):
         return "通行费发票"
     if re.search(r"餐饮|饭店|餐厅", merged):
         return "餐饮发票"
+    if re.search(r"快递|配送", merged):
+        return "快递发票"
+    if re.search(r"打印|文印|复印|办公用品|文具", merged):
+        return "办公发票"
+    if re.search(r"材料|配件|设备", merged):
+        return "材料发票"
+    if re.search(r"会议|培训", merged):
+        return "会议培训发票"
+    if re.search(r"租赁", merged):
+        return "租赁发票"
     if re.search(r"专用发票", merged):
         return "专用发票"
     if re.search(r"增值税|发票号码|发票代码|电子发票", merged):
@@ -109,6 +130,7 @@ def extract_fields_from_text(text: str, path: Path) -> Dict[str, Any]:
     fields: Dict[str, Any] = {
         "document_type": detect_document_type(raw, path),
         "issue_date": "",
+        "travel_date": "",
         "invoice_number": "",
         "invoice_code": "",
         "seller_name": "",
@@ -118,6 +140,9 @@ def extract_fields_from_text(text: str, path: Path) -> Dict[str, Any]:
         "total_with_tax": "",
         "origin": "",
         "destination": "",
+        "train_departure_time": "",
+        "refund_fee": "",
+        "change_fee": "",
         "description": "",
     }
 
@@ -133,17 +158,27 @@ def extract_fields_from_text(text: str, path: Path) -> Dict[str, Any]:
 
     if fields["document_type"] == "高铁发票":
         travel_date = re.search(
-            r"(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?)\s+\d{1,2}:\d{2}\s*开",
+            r"乘车日期[：:]\s*(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?)",
+            cleaned,
+        ) or re.search(
+            r"(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?)\s+(?:\d{1,2}:\d{2}\s*)?(?:开|乘车)",
             cleaned,
         )
         if travel_date:
-            fields["issue_date"] = travel_date.group(1)
+            fields["travel_date"] = travel_date.group(1)
+        departure_time = re.search(
+            r"(?:20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?\s*)?(\d{1,2}:\d{2})\s*开",
+            cleaned,
+        )
+        if departure_time:
+            fields["train_departure_time"] = departure_time.group(1)
 
     if not fields["issue_date"]:
         date_match = re.search(r"(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}|20\d{6})", cleaned)
         if date_match:
             fields["issue_date"] = date_match.group(1)
     fields["issue_date"] = normalize_date(fields["issue_date"])
+    fields["travel_date"] = normalize_date(fields["travel_date"])
 
     buyer_cell = re.search(r"购买方.*?</td>\s*<td[^>]*>(.*?)</td>", raw, re.DOTALL)
     seller_cell = re.search(r"销售方.*?</td>\s*<td[^>]*>(.*?)</td>", raw, re.DOTALL)
@@ -165,9 +200,21 @@ def extract_fields_from_text(text: str, path: Path) -> Dict[str, Any]:
         fields["total_with_tax"] = total_with_tax.group(1).replace(",", "")
 
     if fields["document_type"] == "高铁发票":
-        train_amount = re.search(r"(?:票价|退票费)[：:]?\s*[¥￥]\s*([\d,]+\.\d{2})", cleaned)
-        if train_amount:
-            fields["total_with_tax"] = train_amount.group(1).replace(",", "")
+        ticket_fee = extract_labeled_amount(cleaned, "票价")
+        refund_fee = extract_labeled_amount(cleaned, "退票费")
+        change_fee = extract_labeled_amount(cleaned, "改签费")
+        fields["refund_fee"] = refund_fee
+        fields["change_fee"] = change_fee
+        if refund_fee and "退票" in cleaned:
+            fields["total_with_tax"] = refund_fee
+        elif change_fee and "改签" in cleaned:
+            fields["total_with_tax"] = change_fee
+        elif ticket_fee:
+            fields["total_with_tax"] = ticket_fee
+        elif refund_fee:
+            fields["total_with_tax"] = refund_fee
+        elif change_fee:
+            fields["total_with_tax"] = change_fee
 
     if fields["document_type"] == "行程单":
         itinerary_amount = re.search(
@@ -211,6 +258,11 @@ def extract_party_name(cleaned: str, party_label: str) -> str:
         if match:
             return clean_party_name(match.group(1))
     return ""
+
+
+def extract_labeled_amount(cleaned: str, label: str) -> str:
+    match = re.search(rf"{label}[：:]?\s*[¥￥]?\s*([\d,]+\.\d{{2}})", cleaned)
+    return match.group(1).replace(",", "") if match else ""
 
 
 def clean_party_name(value: str) -> str:

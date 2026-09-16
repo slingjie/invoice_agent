@@ -27,7 +27,7 @@ from .models import (
 )
 from .ocr import PaddleOcrProvider
 from .pdf_export import export_company_pdf
-from .scanner import SUPPORTED_EXTENSIONS, scan_documents, sha256_file
+from .scanner import SUPPORTED_EXTENSIONS, is_inside, is_strict_child, scan_documents, sha256_file
 from .trip_audit import TripAuditLlmClient, TripAuditPolicy, run_trip_audit
 
 
@@ -74,7 +74,9 @@ def organize_folder(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     provider = ocr_provider or PaddleOcrProvider()
-    paths = [path for path in scan_documents(folder) if not _is_inside(path, output_dir)]
+    paths = scan_documents(folder)
+    if is_strict_child(output_dir, folder):
+        paths = [path for path in paths if not is_inside(path, output_dir)]
     records = _parse_records(
         paths,
         trip,
@@ -526,13 +528,17 @@ def _record_from_parsed(
     document_type = str(fields.get("document_type") or "其他/无法识别")
     include = bool(parsed.ok and is_invoice_type(document_type))
     total_with_tax = str(fields.get("total_with_tax") or "")
+    document_date = str(
+        (fields.get("travel_date") if document_type == "高铁发票" else fields.get("issue_date")) or ""
+    )
     if document_type == "行程单" and not total_with_tax:
         total_with_tax = str(fields.get("total_amount") or "")
     risk_note = ""
     status = "已识别" if parsed.ok and document_type != "其他/无法识别" else "无法识别"
-    if parsed.ok and include and (not fields.get("invoice_number") or not fields.get("issue_date") or not total_with_tax):
+    if parsed.ok and include and (not fields.get("invoice_number") or not document_date or not total_with_tax):
         status = "待人工确认"
-        risk_note = "缺少发票号码/日期/金额"
+        date_label = "乘车日期" if document_type == "高铁发票" else "日期"
+        risk_note = f"缺少发票号码/{date_label}/金额"
     if not parsed.ok:
         risk_note = (parsed.error or {}).get("message", "")
     return ExpenseRecord(
@@ -546,7 +552,7 @@ def _record_from_parsed(
         trip_start_date=trip.trip_start_date,
         trip_end_date=trip.trip_end_date,
         daily_meal_allowance=trip.daily_meal_allowance,
-        document_date=str(fields.get("issue_date") or ""),
+        document_date=document_date,
         document_type=document_type,
         include_in_amount=include,
         invoice_number=str(fields.get("invoice_number") or ""),
@@ -558,6 +564,9 @@ def _record_from_parsed(
         total_with_tax=total_with_tax,
         origin=str(fields.get("origin") or ""),
         destination=str(fields.get("destination") or ""),
+        train_departure_time=str(fields.get("train_departure_time") or ""),
+        refund_fee=str(fields.get("refund_fee") or ""),
+        change_fee=str(fields.get("change_fee") or ""),
         description=str(fields.get("description") or ""),
         recognition_status=status,
         risk_note=risk_note,
@@ -761,11 +770,3 @@ def sanitize_filename(text: str) -> str:
     text = re.sub(r"[\\/:*?\"<>|]", "_", str(text))
     text = re.sub(r"\s+", " ", text).strip()
     return text[:120]
-
-
-def _is_inside(path: Path, maybe_parent: Path) -> bool:
-    try:
-        path.resolve().relative_to(maybe_parent.resolve())
-        return True
-    except ValueError:
-        return False

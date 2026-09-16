@@ -243,6 +243,8 @@ def _detail_line(record: ExpenseRecord, amount: Decimal) -> CompanyDetailLine:
 def _detail_section(record: ExpenseRecord) -> str:
     if record.reimbursement_category == "住宿费":
         return "差旅费"
+    if record.high_level_category == "餐饮费":
+        return "餐饮费"
     if record.high_level_category == "招待费":
         return "招待费（餐饮、娱乐）"
     if record.high_level_category == "材料费":
@@ -326,6 +328,7 @@ def _fill_detail_sheet(sheet, data: CompanyReimbursementData) -> None:
             sheet.cell(row, column).value = None
     sections = [
         "招待费（餐饮、娱乐）",
+        "餐饮费",
         "差旅费",
         "交通费",
         "办公费",

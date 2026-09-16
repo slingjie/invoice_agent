@@ -12,21 +12,27 @@ from pathlib import Path
 from typing import Dict, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from .analysis import compute_high_level_category
 from .cancellation import CancellationControl
 from .config import load_agent_config
 from .excel import build_preview
 from .models import TripInfo
+from .mineru_fallback import MinerUFallbackProvider
 from .ocr import SdkOcrProvider
 from .pipeline import (
     ORGANIZE_MODE_BATCH_SUBFOLDERS,
     ORGANIZE_MODE_SINGLE,
     _assign_names,
+    _record_from_parsed,
+    _sort_key,
+    analyze_records,
     export_records,
     organize_batch_subfolders,
     organize_folder,
+    resolve_output_dir,
     write_result_files,
 )
-from .scanner import scan_documents
+from .scanner import is_inside, is_strict_child, scan_documents
 from .trip_audit import TripAuditPolicy, run_trip_audit
 
 
@@ -62,7 +68,7 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>出差报销包整理 Agent</title>
   <link rel="stylesheet" href="/static/app.css?v=task-cancellation-v1">
-  <script src="/static/app.js?v=task-cancellation-v1" defer></script>
+  <script src="/static/app.js?v=review-category-v1" defer></script>
 </head>
 <body data-initial-task-id="{html.escape(start_task_id)}" data-task-state="idle">
   <div class="app-shell">
@@ -384,6 +390,37 @@ class InvoiceAgentHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"error": str(exc)}, status=400)
             return
+        package_record_retry = parse_task_package_record_retry_path(self.path)
+        if package_record_retry:
+            task_id, package_id, sequence = package_record_retry
+            try:
+                self._send_json(retry_task_record(task_id, sequence, package_id=package_id))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+        package_retry_failed = parse_task_package_retry_failed_path(self.path)
+        if package_retry_failed:
+            task_id, package_id = package_retry_failed
+            try:
+                self._send_json(retry_failed_task_records(task_id, package_id=package_id))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+        task_record_retry = parse_task_record_retry_path(self.path)
+        if task_record_retry:
+            task_id, sequence = task_record_retry
+            try:
+                self._send_json(retry_task_record(task_id, sequence))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+        retry_failed = parse_task_retry_failed_path(self.path)
+        if retry_failed:
+            try:
+                self._send_json(retry_failed_task_records(retry_failed))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
         package_record = parse_task_package_record_path(self.path)
         if package_record:
             task_id, package_id, sequence = package_record
@@ -543,6 +580,40 @@ def parse_task_package_record_path(path: str) -> Tuple[str, str, str] | None:
     return None
 
 
+def parse_task_record_retry_path(path: str) -> Tuple[str, str] | None:
+    parts = path.strip("/").split("/")
+    if len(parts) == 5 and parts[0] == "tasks" and parts[2] == "records" and parts[4] == "retry":
+        return parts[1], parts[3]
+    return None
+
+
+def parse_task_package_record_retry_path(path: str) -> Tuple[str, str, str] | None:
+    parts = path.strip("/").split("/")
+    if (
+        len(parts) == 7
+        and parts[0] == "tasks"
+        and parts[2] == "packages"
+        and parts[4] == "records"
+        and parts[6] == "retry"
+    ):
+        return parts[1], parts[3], parts[5]
+    return None
+
+
+def parse_task_retry_failed_path(path: str) -> str | None:
+    parts = path.strip("/").split("/")
+    if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "retry-failed":
+        return parts[1]
+    return None
+
+
+def parse_task_package_retry_failed_path(path: str) -> Tuple[str, str] | None:
+    parts = path.strip("/").split("/")
+    if len(parts) == 5 and parts[0] == "tasks" and parts[2] == "packages" and parts[4] == "retry-failed":
+        return parts[1], parts[3]
+    return None
+
+
 def parse_task_package_export_path(path: str) -> Tuple[str, str] | None:
     parts = path.strip("/").split("/")
     if len(parts) == 5 and parts[0] == "tasks" and parts[2] == "packages" and parts[4] == "export":
@@ -646,13 +717,16 @@ EDITABLE_RECORD_FIELDS = {
     "project_name": "project_name",
     "document_date": "document_date",
     "document_type": "document_type",
-    "reimbursement_category": "high_level_category",  # 前端表单字段 → 存储到 high_level_category
+    "reimbursement_category": "reimbursement_category",
     "invoice_number": "invoice_number",
     "seller_name": "seller_name",
     "buyer_name": "buyer_name",
     "total_with_tax": "total_with_tax",
     "origin": "origin",
     "destination": "destination",
+    "train_departure_time": "train_departure_time",
+    "refund_fee": "refund_fee",
+    "change_fee": "change_fee",
     "description": "description",
     "risk_note": "risk_note",
 }
@@ -680,6 +754,8 @@ def update_task_record(task_id: str, sequence: str, form: Dict[str, str], packag
         for form_key, record_attr in EDITABLE_RECORD_FIELDS.items():
             if form_key in form:
                 setattr(target, record_attr, form[form_key].strip())
+        if "reimbursement_category" in form:
+            target.high_level_category = compute_high_level_category(target)
         if "include_in_amount" in form:
             target.include_in_amount = parse_yes_no(form.get("include_in_amount"))
         _assign_names(records)
@@ -701,6 +777,219 @@ def update_task_record(task_id: str, sequence: str, form: Dict[str, str], packag
         write_result_files(output_path, records, write_excel=False, trip_audit=trip_audit)
     sync_task_files_from_records(task_id, records, package_id=package_id)
     return {"preview": preview, "record": target.to_json()}
+
+
+RETRYABLE_TASK_STATES = {"review", "failed"}
+FAILED_RECOGNITION_STATUS = "无法识别"
+RETRY_TIMEOUT_SECONDS = 300
+RETRY_REQUEST_TIMEOUT_SECONDS = 180
+
+
+def retry_task_record(task_id: str, sequence: str, package_id: str | None = None) -> Dict:
+    if not sequence.isdigit():
+        raise ValueError("Invalid record sequence")
+    target_sequence = int(sequence)
+    with TASK_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        _raise_if_task_not_retryable(task)
+        package = _retry_package(task, package_id)
+        records = list((package if package is not None else task).get("records") or task.get("_records") or [])
+        target_index = next((index for index, record in enumerate(records) if record.sequence == target_sequence), None)
+        if target_index is None:
+            raise ValueError("Record not found")
+        original = records[target_index]
+        if original.recognition_status != FAILED_RECOGNITION_STATUS:
+            raise ValueError("Record is not retryable")
+        provider = _retry_provider(task, package)
+        _mark_retrying(task, original, package_id=package_id)
+
+    parsed = provider.parse(original.source_path)
+    parsed = _maybe_parse_with_mineru(original.source_path, parsed, task)
+    replacement = _record_from_parsed(
+        original.source_path,
+        _trip_info_from_record(original),
+        parsed,
+        file_hash=original.file_hash,
+    )
+    if parsed.raw_result.get("provider") == "mineru_fallback":
+        replacement.risk_note = _append_mineru_success_note(replacement.risk_note)
+    records[target_index] = replacement
+    records, preview, trip_audit = _rebuild_retry_records(records, task, package)
+
+    with TASK_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        package = _retry_package(task, package_id)
+        if package is not None:
+            package["records"] = records
+            package["trip_audit"] = trip_audit
+            _update_public_package(
+                task,
+                package_id or "",
+                state="review",
+                preview=preview,
+                can_export=bool(records),
+                error="",
+                total=len(records),
+                completed=len(records),
+            )
+            task["state"] = batch_task_state(task)
+            task["stage"] = "等待确认"
+            task["can_export"] = any(item.get("can_export") for item in task.get("packages", []))
+        else:
+            task["_records"] = records
+            task["_trip_audit"] = trip_audit
+            task["preview"] = preview
+            task["state"] = "review"
+            task["stage"] = "等待确认"
+            task["can_export"] = bool(records)
+            task["completed"] = len(records)
+            task["total"] = len(records)
+        task["retrying"] = False
+        task["updated_at"] = time.time()
+        output_dir = _retry_output_dir(task, package)
+        response_record = next(
+            record for record in records if str(record.source_path) == str(original.source_path)
+        )
+
+    if output_dir:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        write_result_files(output_path, records, write_excel=False, trip_audit=trip_audit)
+    sync_task_files_from_records(task_id, records, package_id=package_id)
+    return {"preview": preview, "record": response_record.to_json(), "task": get_task_snapshot(task_id)}
+
+
+def retry_failed_task_records(task_id: str, package_id: str | None = None) -> Dict:
+    with TASK_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        _raise_if_task_not_retryable(task)
+        package = _retry_package(task, package_id)
+        records = list((package if package is not None else task).get("records") or task.get("_records") or [])
+        retry_targets = [
+            (str(record.source_path), record.original_name)
+            for record in records
+            if record.recognition_status == FAILED_RECOGNITION_STATUS
+        ]
+    retried = []
+    for source_path, name in retry_targets:
+        with TASK_LOCK:
+            task = TASKS.get(task_id)
+            package = _retry_package(task, package_id) if task else None
+            records = list((package if package is not None else task).get("records") or task.get("_records") or [])
+            current = next((record for record in records if str(record.source_path) == source_path), None)
+            if current is None or current.recognition_status != FAILED_RECOGNITION_STATUS:
+                continue
+            sequence = current.sequence
+        result = retry_task_record(task_id, str(sequence), package_id=package_id)
+        retried.append(
+            {
+                "sequence": sequence,
+                "name": name,
+                "status": result["record"]["recognition_status"],
+            }
+        )
+    return {"retried": retried, "task": get_task_snapshot(task_id)}
+
+
+def _raise_if_task_not_retryable(task: Dict) -> None:
+    if task.get("state") not in RETRYABLE_TASK_STATES:
+        raise ValueError("Task is not ready for retry")
+
+
+def _retry_package(task: Dict, package_id: str | None) -> Dict | None:
+    if not package_id:
+        return None
+    package = (task.get("_packages") or {}).get(package_id)
+    if not package:
+        raise ValueError("Package not found")
+    return package
+
+
+def _retry_provider(task: Dict, package: Dict | None):
+    if package and package.get("ocr_provider"):
+        return package["ocr_provider"]
+    if task.get("_ocr_provider"):
+        return task["_ocr_provider"]
+    config = task.get("_ocr_provider_config") or {}
+    return SdkOcrProvider(
+        access_token=config.get("access_token") or None,
+        timeout_seconds=max(int(config.get("timeout_seconds") or 120), RETRY_TIMEOUT_SECONDS),
+        request_timeout_seconds=max(
+            int(config.get("request_timeout_seconds") or 60),
+            RETRY_REQUEST_TIMEOUT_SECONDS,
+        ),
+    )
+
+
+def _maybe_parse_with_mineru(path: Path, parsed, task: Dict):
+    config = task.get("_mineru_fallback_config") or {}
+    if parsed.ok or not config.get("enabled") or path.suffix.lower() != ".pdf":
+        return parsed
+    provider = MinerUFallbackProvider(
+        script_path=config.get("script_path") or None,
+        timeout_seconds=int(config.get("timeout_seconds") or 300),
+    )
+    mineru = provider.parse(path)
+    if mineru.ok:
+        return mineru
+    paddle_message = (parsed.error or {}).get("message", "")
+    mineru_message = (mineru.error or {}).get("message", "")
+    parsed.error = {
+        "code": (parsed.error or {}).get("code", "SDK_ERROR"),
+        "message": f"PaddleOCR失败：{paddle_message}；MinerU兜底失败：{mineru_message}",
+    }
+    return parsed
+
+
+def _append_mineru_success_note(risk_note: str) -> str:
+    note = "PaddleOCR失败后使用MinerU兜底解析"
+    return "；".join(part for part in [note, risk_note] if part)
+
+
+def _retry_output_dir(task: Dict, package: Dict | None):
+    if package is not None:
+        return package.get("output_dir")
+    return task.get("_output_dir") or task.get("output_dir")
+
+
+def _mark_retrying(task: Dict, record, package_id: str | None = None) -> None:
+    task["retrying"] = True
+    task["stage"] = "重新识别中"
+    task["can_export"] = False
+    if not package_id:
+        for row in task.get("files", []):
+            if row.get("path") == str(record.source_path):
+                row["status"] = "重新识别中"
+                row["message"] = ""
+                break
+    task["updated_at"] = time.time()
+
+
+def _trip_info_from_record(record) -> TripInfo:
+    return TripInfo(
+        project_name=record.project_name,
+        traveler=record.traveler,
+        department=record.department,
+        trip_start_date=record.trip_start_date,
+        trip_end_date=record.trip_end_date,
+        daily_meal_allowance=record.daily_meal_allowance,
+    )
+
+
+def _rebuild_retry_records(records, task: Dict, package: Dict | None = None):
+    records.sort(key=_sort_key)
+    analyze_records(records)
+    _assign_names(records)
+    policy = (package or task).get("trip_audit_policy") or task.get("_trip_audit_policy") or TripAuditPolicy()
+    trip_audit = run_trip_audit(records, policy)
+    preview = build_preview(records, trip_audit)
+    return records, preview, trip_audit
 
 
 def start_organize_task(form: Dict[str, str]) -> str:
@@ -820,6 +1109,16 @@ def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
             task = TASKS.get(task_id)
             if task:
                 cancellation = task.setdefault("_cancellation", CancellationControl())
+                task["_ocr_provider_config"] = {
+                    "access_token": config.paddleocr_access_token,
+                    "timeout_seconds": timeout_seconds,
+                    "request_timeout_seconds": config.request_timeout_seconds,
+                }
+                task["_mineru_fallback_config"] = {
+                    "enabled": getattr(config, "enable_mineru_fallback", False),
+                    "script_path": getattr(config, "mineru_skill_script", ""),
+                    "timeout_seconds": getattr(config, "mineru_timeout_seconds", 300),
+                }
     _log.info("Provider created, starting OCR for folder=%s mode=%s", folder, organize_mode)
     trip_info = TripInfo(
         project_name=form.get("project_name") or folder.name,
@@ -903,7 +1202,8 @@ def run_organize_from_form(form: Dict[str, str], task_id: str | None = None):
             )
         return result
     if task_id:
-        initialize_task_files(task_id, folder)
+        task_output_dir = resolve_output_dir(folder, trip_info.project_name, out_dir)
+        initialize_task_files(task_id, folder, task_output_dir)
     result = organize_folder(
         folder=folder,
         trip_info=trip_info,
@@ -1240,8 +1540,10 @@ def build_trip_audit_policy(form: Dict[str, str], config) -> TripAuditPolicy:
     )
 
 
-def initialize_task_files(task_id: str, folder: Path) -> None:
+def initialize_task_files(task_id: str, folder: Path, output_dir: Path | None) -> None:
     paths = scan_documents(folder.expanduser().resolve())
+    if output_dir and is_strict_child(output_dir, folder):
+        paths = [path for path in paths if not is_inside(path, output_dir)]
     rows = [
         {
             "path": str(path),

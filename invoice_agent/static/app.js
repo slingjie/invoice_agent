@@ -20,6 +20,13 @@ const workspaceGrid = document.querySelector('.workspace-grid');
 const configPanelToggle = document.getElementById('config-panel-toggle');
 const stopTaskButton = document.getElementById('stop-task-button');
 const terminateTaskButton = document.getElementById('terminate-task-button');
+const retryFailedButton = document.createElement('button');
+retryFailedButton.id = 'retry-failed-button';
+retryFailedButton.className = 'secondary';
+retryFailedButton.type = 'button';
+retryFailedButton.textContent = '重试全部失败文件';
+retryFailedButton.hidden = true;
+terminateTaskButton.insertAdjacentElement('afterend', retryFailedButton);
 
 let pollTimer = null;
 let currentTaskId = null;
@@ -54,6 +61,11 @@ function updateTaskCancelControls(state) {
   terminateTaskButton.hidden = !canTerminate;
   stopTaskButton.disabled = false;
   terminateTaskButton.disabled = false;
+}
+
+function updateRetryControls(canRetry) {
+  retryFailedButton.hidden = !canRetry;
+  retryFailedButton.disabled = false;
 }
 
 function renderStepper(state) {
@@ -138,6 +150,7 @@ function renderTask(task) {
   }
   currentPackageId = null;
   batchPackages.innerHTML = '';
+  updateRetryControls(['review', 'failed'].includes(task.state) && (task.files || []).some((file) => file.status === '无法识别'));
   const elapsed = task.elapsed_seconds || 0;
   title.textContent = task.stage || '处理中';
   meta.textContent = `已用时 ${elapsed} 秒`;
@@ -226,6 +239,7 @@ function renderBatchTask(task) {
   const currentPackage = packages.find((item) => item.id === currentPackageId) || null;
   renderBatchPackages(packages, currentPackageId, task.state);
   renderPreview(currentPackage ? currentPackage.preview : null, currentPackageId);
+  updateRetryControls(['review', 'failed'].includes(task.state) && currentPackage && previewHasFailedRecords(currentPackage.preview));
 
   if (task.state === 'stopping' || task.state === 'terminating') {
     setTaskState('running');
@@ -359,6 +373,10 @@ terminateTaskButton.addEventListener('click', function() {
     return;
   }
   requestTaskCancellation('terminate');
+});
+
+retryFailedButton.addEventListener('click', function() {
+  retryFailedRecords();
 });
 
 batchPackages.addEventListener('click', async function(event) {
@@ -634,7 +652,7 @@ function renderOverviewTable(items) {
   if (!items.length) {
     return '<p class="hint">暂无表格总览</p>';
   }
-  const columns = ['序号', '日期', '凭证类别', '报销大类', '金额', '是否计入', '风险', '原文件名'];
+  const columns = ['序号', '日期', '凭证类别', '细分类别', '报销大类', '金额', '是否计入', '风险', '原文件名'];
   const head = columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('');
   const body = items.map((item) => {
     const sequence = item['序号'] ?? '';
@@ -655,7 +673,7 @@ function renderReviewCards(items) {
     const isPdf = /\.pdf$/i.test(fileName);
     const isImage = /\.(png|jpe?g|webp)$/i.test(fileName);
     const preview = renderFilePreview(previewUrl, fileUrl, fileName, isPdf, isImage);
-    const readOnly = renderReviewReadOnly(item);
+    const readOnly = renderReviewReadOnly(item, sequence);
     const editForm = renderReviewEditForm(sequence, item);
     return `<article class="review-card" id="review-card-${escapeHtml(sequence)}" data-review-sequence="${escapeHtml(sequence)}">
       <div class="review-card-preview">${preview}</div>
@@ -672,17 +690,19 @@ function renderReviewCards(items) {
   return `<section class="review-card-list" aria-label="图文核对"><div class="preview-subhead"><h4>图文核对</h4><span>点击发票预览可放大检查</span></div>${cards}</section>`;
 }
 
-function renderReviewReadOnly(item) {
+function renderReviewReadOnly(item, sequence) {
   const summary = [
     ['项目', item['项目名称']],
     ['金额', item['价税合计']],
     ['日期', item['凭证日期']],
+    ['细分类', item['细分类别']],
     ['大类', item['报销大类']]
   ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? '')}</strong></div>`).join('');
   const coreFields = [
     ['项目名称', item['项目名称']],
     ['凭证日期', item['凭证日期']],
     ['凭证类别', item['凭证类别']],
+    ['细分类别', item['细分类别']],
     ['报销大类', item['报销大类']],
     ['发票号码', item['发票号码']]
   ].map(([label, value]) => `<div class="review-field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? '')}</strong></div>`).join('');
@@ -691,6 +711,9 @@ function renderReviewReadOnly(item) {
     ['购方名称', item['购方名称']],
     ['起点', item['起点']],
     ['终点', item['终点']],
+    ['发车时间', item['发车时间']],
+    ['退票费', item['退票费']],
+    ['改签费', item['改签费']],
     ['行程/住宿说明', item['行程/住宿说明']],
     ['风险提示', item['风险提示']]
   ].map(([label, value]) => `<div class="review-field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? '')}</strong></div>`).join('');
@@ -702,6 +725,7 @@ function renderReviewReadOnly(item) {
       <div class="review-field-grid">${extraFields}</div>
     </details>
     <div class="review-edit-actions">
+      ${item['凭证类别'] === '其他/无法识别' ? `<button class="secondary" type="button" data-review-retry="${escapeHtml(sequence)}">重新识别</button>` : ''}
       <button class="review-edit-toggle-button" type="button" data-review-edit-toggle>编辑</button>
     </div>
   </div>`;
@@ -713,7 +737,7 @@ function renderReviewEditForm(sequence, item) {
     ['total_with_tax', '价税合计', item['价税合计']],
     ['document_date', '凭证日期', item['凭证日期']],
     ['document_type', '凭证类别', item['凭证类别']],
-    ['reimbursement_category', '报销大类', item['报销大类']],
+    ['reimbursement_category', '细分类别', item['细分类别']],
     ['invoice_number', '发票号码', item['发票号码']]
   ].map(([name, label, value]) => renderEditField(name, label, value)).join('');
   const extraFields = [
@@ -721,12 +745,19 @@ function renderReviewEditForm(sequence, item) {
     ['buyer_name', '购方名称', item['购方名称']],
     ['origin', '起点', item['起点']],
     ['destination', '终点', item['终点']],
+    ['train_departure_time', '发车时间', item['发车时间']],
+    ['refund_fee', '退票费', item['退票费']],
+    ['change_fee', '改签费', item['改签费']],
     ['description', '行程/住宿说明', item['行程/住宿说明']],
     ['risk_note', '风险提示', item['风险提示']]
   ].map(([name, label, value]) => renderEditField(name, label, value)).join('');
   return `<form class="review-edit-form" data-review-edit="${escapeHtml(sequence)}">
     <div class="review-field-grid review-core-grid">
       ${coreFields}
+      <label class="review-edit-field">
+        <span>报销大类（自动）</span>
+        <input value="${escapeHtml(item['报销大类'] ?? '')}" readonly>
+      </label>
       <label class="review-edit-field">
         <span>是否计入金额</span>
         <select name="include_in_amount">
@@ -839,6 +870,11 @@ previewPanel.addEventListener('change', function(event) {
 });
 
 previewPanel.addEventListener('click', function(event) {
+  const retryButton = event.target.closest('[data-review-retry]');
+  if (retryButton) {
+    retryRecord(retryButton.dataset.reviewRetry, retryButton);
+    return;
+  }
   const editToggle = event.target.closest('[data-review-edit-toggle]');
   if (editToggle) {
     const card = editToggle.closest('.review-card');
@@ -935,6 +971,64 @@ async function saveReviewEdits(form) {
     status.textContent = `保存失败：${error.message}`;
     button.disabled = false;
   }
+}
+
+async function retryRecord(sequence, triggerButton = null) {
+  if (!currentTaskId || !sequence) {
+    return;
+  }
+  if (triggerButton) {
+    triggerButton.disabled = true;
+    triggerButton.textContent = '重新识别中...';
+  }
+  exportButton.disabled = true;
+  statusBox.innerHTML = '<span class="spinner"></span>正在重新识别失败发票，PDF 失败时会尝试 MinerU 兜底...';
+  try {
+    const baseUrl = currentPackageId
+      ? `/tasks/${encodeURIComponent(currentTaskId)}/packages/${encodeURIComponent(currentPackageId)}`
+      : `/tasks/${encodeURIComponent(currentTaskId)}`;
+    const response = await fetch(`${baseUrl}/records/${encodeURIComponent(sequence)}/retry`, { method: 'POST' });
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    renderTask(data.task || data);
+  } catch (error) {
+    statusBox.textContent = `重新识别失败：${error.message}`;
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.textContent = '重新识别';
+    }
+  }
+}
+
+async function retryFailedRecords() {
+  if (!currentTaskId) {
+    return;
+  }
+  retryFailedButton.disabled = true;
+  retryFailedButton.textContent = '重试中...';
+  exportButton.disabled = true;
+  statusBox.innerHTML = '<span class="spinner"></span>正在重试全部失败文件，PDF 失败时会尝试 MinerU 兜底...';
+  try {
+    const baseUrl = currentPackageId
+      ? `/tasks/${encodeURIComponent(currentTaskId)}/packages/${encodeURIComponent(currentPackageId)}`
+      : `/tasks/${encodeURIComponent(currentTaskId)}`;
+    const response = await fetch(`${baseUrl}/retry-failed`, { method: 'POST' });
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    renderTask(data.task || data);
+  } catch (error) {
+    statusBox.textContent = `重试失败：${error.message}`;
+    retryFailedButton.disabled = false;
+    retryFailedButton.textContent = '重试全部失败文件';
+  }
+}
+
+function previewHasFailedRecords(preview) {
+  return Boolean(preview && (preview.review_cards || []).some((item) => item['凭证类别'] === '其他/无法识别'));
 }
 
 document.addEventListener('keydown', function(event) {
