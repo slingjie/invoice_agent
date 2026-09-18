@@ -27,6 +27,7 @@ from .models import (
 )
 from .ocr import PaddleOcrProvider
 from .pdf_export import export_company_pdf
+from .html_report import export_company_html
 from .scanner import SUPPORTED_EXTENSIONS, is_inside, is_strict_child, scan_documents, sha256_file
 from .trip_audit import TripAuditLlmClient, TripAuditPolicy, run_trip_audit
 
@@ -285,6 +286,12 @@ def write_result_files(
         write_company_workbook(company_path, data)
         artifacts.append(ExportArtifact("company_excel", company_path, "success"))
         warnings.extend(data.warnings)
+        html_path = output_dir / "01_公司报销单_A5可编辑打印台.html"
+        try:
+            export_company_html(data, html_path)
+            artifacts.append(ExportArtifact("company_html", html_path, "success"))
+        except Exception as html_e:
+            artifacts.append(ExportArtifact("company_html", html_path, "failed", str(html_e)))
     except Exception as exc:
         message = f"公司报销单生成失败：{exc}"
         artifacts.append(ExportArtifact("company_excel", company_path, "failed", message))

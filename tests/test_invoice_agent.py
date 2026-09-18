@@ -1129,8 +1129,14 @@ def test_export_records_generates_company_excel_and_preserves_summary(tmp_path: 
 
     assert (tmp_path / "out" / "00_报销清单.xlsx").exists()
     assert (tmp_path / "out" / "01_公司报销单.xlsx").exists()
+    assert (tmp_path / "out" / "01_公司报销单_A5可编辑打印台.html").exists()
     assert result.status == "success"
-    assert {artifact.kind for artifact in result.artifacts} == {"summary_excel", "company_excel", "company_pdf"}
+    assert {artifact.kind for artifact in result.artifacts} == {
+        "summary_excel",
+        "company_excel",
+        "company_pdf",
+        "company_html",
+    }
 
 
 def test_export_records_keeps_summary_when_company_export_fails(tmp_path: Path, monkeypatch):
