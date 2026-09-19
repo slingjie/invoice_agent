@@ -1,22 +1,53 @@
-# 出差报销包整理 Agent
+# 差旅发票智能整理与报销单自动化 Agent
 
-本工具递归扫描一次出差文件夹中的发票和行程单，使用 PaddleOCR 文档解析 API 识别内容，生成 Excel 报销清单、原始识别结果和重命名预览。默认不修改原文件；确认后可用 `--apply` 复制并重命名到输出目录。
+面向企业差旅报销场景的智能发票处理流水线。通过扫描指定差旅发票文件夹，调用 **PaddleOCR 文档解析 API** 深度识别发票与行程单内容，智能核验行程闭环与发票抬头合规性，按公司财务规范批量重命名发票，并自动生成结构化 Excel 清单、公司报销单 Excel、打印就绪的 PDF，以及 **1:1 像素级复刻标杆的 A5 可视化可编辑打印工单（HTML）**。
 
-## PaddleOCR 配置
+---
 
-推荐使用本地配置文件，不需要配置系统环境变量。复制示例文件：
+## 核心特性
+
+- 🧾 **全票种智能识别**：深度支持增值税专票/普票/电票、高铁电子客票、航空行程单、网约车电子发票及行程单、客运汽车票、公路通行费发票等。
+- 🔍 **四重财务合规性稽核**：
+  - **发票抬头核验**：严格校验购买方抬头是否为公司标准抬头（如“杭州勤合能源科技有限公司”），非客运实名票出现抬头不符主动告警。
+  - **行程闭环诊断**：智能识别首末段城际大交通，检查常驻城市往返闭环与中间交通连续性。
+  - **市内交通超标预警**：自动汇总每日打车金额，超出建议日限额（默认 100 元/天）自动提示。
+  - **网约车智能防重**：自动识别同一行程的行程单与电子发票，防止重复报销入账。
+- 🌟 **1:1 像素级 A5 可编辑交互工单 (`html_report.py`)**：
+  - **物理纸张锁死**：差旅费报销单与日常报销单锁定 **A5 横向（210mm × 148mm）**，明细表锁定 **A4 纵向**，打印绝不分页、绝不挤压。
+  - **全量小数无损展示**：严格遵守财务规范，发票本身含多少位小数即原样展示多少位，**严禁四舍五入**。
+  - **防遮挡排版设计**：彻底清除 `overflow:hidden` 截断，优化金额列宽，末尾小数清晰饱满。
+  - **就地微调与实时重算**：支持鼠标点击单元格直接修改文字/金额，修改后自动毫秒级重算合计与**标准财务人民币大写（角分厘毫全量映射）**。
+- 📊 **五大交付物一键闭环**：
+  1. `01_公司报销单_A5可编辑打印台.html`：所见即所得交互工单，支持直接打印或微调；
+  2. `01_公司报销单.xlsx`：公司财务标准格式报销单；
+  3. `01_公司报销单.pdf`：打印就绪版 PDF 单据；
+  4. `00_报销清单.xlsx`：全量发票结构化明细大表；
+  5. `01_已识别_重命名/`：按财务规范重命名的发票归档库。
+
+---
+
+## 快速上手
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 配置文件
+
+复制配置样例文件：
 
 ```bash
 cp invoice_agent_config.example.json invoice_agent_config.json
 ```
 
-然后手动编辑 `invoice_agent_config.json`：
+编辑 `invoice_agent_config.json`：
 
 ```json
 {
-  "paddleocr_job_url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
-  "paddleocr_model": "PaddleOCR-VL-1.6",
-  "paddleocr_access_token": "replace-with-your-token",
+  "paddleocr_doc_parsing_api_url": "https://your-api-endpoint.com/layout-parsing",
+  "paddleocr_access_token": "your-access-token",
   "city_transport_daily_limit": "100",
   "lodging_daily_limit": "",
   "llm_base_url": "",
@@ -25,261 +56,66 @@ cp invoice_agent_config.example.json invoice_agent_config.json
 }
 ```
 
-> **注意：** 本项目仅支持 PaddleOCR 异步 Job API（V1.6 模型）。旧版 Layout API 已不再支持。
-
-也可以继续使用环境变量：
+也可以通过环境变量提供：
 
 ```bash
 export PADDLEOCR_ACCESS_TOKEN="your-token"
 ```
 
-## trip_info.json
+---
 
-```json
-{
-  "project_name": "上海出差",
-  "traveler": "张三",
-  "department": "技术部",
-  "trip_start_date": "2026-03-01",
-  "trip_end_date": "2026-03-03",
-  "daily_meal_allowance": "50"
-}
-```
+## 命令行 CLI 使用
 
-`project_name` 可省略，省略时使用文件夹名。`daily_meal_allowance` 为单日餐补金额，可省略，默认 `50`。出差餐补按包含式天数计算，例如 `2026-01-01` 至 `2026-01-05` 按 5 天；餐补不需要发票，因此在"类别汇总"中"出差餐补"的张数固定为 `0`。其他字段必须提供，也可以通过 CLI 参数覆盖。
-
-## 报销汇总规范
-
-- **报销清单**使用汇总分类（交通费 / 差旅费 / 餐饮费 / 材料费 / 其他），支持手动编辑。
-- **类别汇总**保留细粒度分类（行程交通费 / 市区交通费 / 过路费 / 油费 / 退改费 / 住宿费 / 餐饮费 / 其他费用）。
-- 高维分类自动映射规则：
-  - 交通费：高铁、火车、机票、网约车、出租车、地铁、高速通行费、油费和退改签费用
-  - 差旅费：住宿
-  - 餐饮费：餐饮、餐费相关
-  - 办公费：快递、打印、文印、办公用品和文具
-  - 材料费：材料、配件和设备
-  - 其他：会议、培训、租赁等无法归入上述类别的费用
-  - 材料费：材料、配件、办公用品相关
-  - 其他：无法归类的票据
-- 出差餐补金额 = `(出差结束日期 - 出差开始日期 + 1) * 单日餐补金额`。
-- 单日餐补金额默认 `50`，可通过 `trip_info.json`、CLI 参数或 Web UI 调整。
-- 出差餐补不需要发票，"类别汇总"中"出差餐补"的张数固定为 `0`。
-- Web UI 的"图文核对"支持人工校对识别字段；点击"保存修改"后，预览、`raw_results.json` 和最终导出的 Excel 都以保存后的数据为准。
-
-## 差旅行程校对
-
-系统会在识别后生成"行程校对"结果，用于辅助发现遗漏票据或超标风险。校对不会阻止导出。
-
-- 出差开始/结束日期是否有对应城际交通票。
-- 最早城际交通的起点会自动作为出发城市，末段终点应回到该城市。
-- 住宿按过夜数校对，例如 `2026-03-01` 至 `2026-03-05` 预计 `4` 晚。
-- 市内交通每日默认标准为 `100` 元，可在 Web UI 或配置文件调整。
-- 住宿每晚上限默认留空；不填时不判断住宿超标。
-- 可勾选"启用大模型行程复核"。大模型只接收结构化票据信息和规则证据，不发送原始 OCR 全文或文件内容；API 不可用时保留本地规则校对结果。
-
-OpenAI 兼容模型配置示例：
+### 1. 预览分析模式（只读预览，零破坏）
 
 ```bash
-export INVOICE_AGENT_LLM_API_KEY="your-api-key"
-```
-
-```json
-{
-  "llm_base_url": "https://api.example.com/v1",
-  "llm_model": "compatible-model",
-  "llm_api_key_env": "INVOICE_AGENT_LLM_API_KEY"
-}
-```
-
-## 预览模式
-
-```bash
-# macOS / Linux
-python3 -m invoice_agent organize ./测试发票 \
+python -m invoice_agent organize ./测试发票/0714-0716福州六和 \
   --config ./invoice_agent_config.json \
-  --trip-info ./trip_info.json \
-  --out-dir ./整理结果预览 \
-  --max-workers 3 \
-  --timeout-seconds 120 \
-  --city-transport-daily-limit 100 \
-  --lodging-daily-limit 450
-
-# Windows
-python -m invoice_agent organize ./测试发票 ^
-  --config ./invoice_agent_config.json ^
-  --trip-info ./trip_info.json ^
-  --out-dir ./整理结果预览
+  --traveler "石凌杰" \
+  --department "项目部" \
+  --project-name "福州六和" \
+  --trip-start-date "2026-07-14" \
+  --trip-end-date "2026-07-16" \
+  --daily-meal-allowance 50
 ```
 
-输出：
+### 2. 正式落盘生成模式 (`--apply`)
 
-```text
-00_报销清单.xlsx
-01_公司报销单.xlsx
-01_公司报销单.pdf
-raw_results.json
-rename_plan.json
-```
-
-`01_公司报销单.xlsx` 按公司正式模板生成：报销明细表使用 A4 纵向，差旅费和日常费用报销单使用 A5 横向。日常费用每 8 条自动分页，差旅交通每 12 条自动分页；没有日常费用时不会生成空白日常费用页。
-
-在 Windows 且安装 Microsoft Excel 时，程序会同步生成合并打印文件 `01_公司报销单.pdf`。其他环境会保留两份 Excel 并提示跳过 PDF；PDF 转换失败也不会删除已生成的 Excel。
-
-## 批量报销包模式
-
-默认仍是单报销包模式：系统会递归扫描一个文件夹，并合并成一次出差处理。一次整理多个出差文件夹时，可以启用批量模式，让每个一级子文件夹独立生成预览和输出：
+加上 `--apply` 参数后，系统将正式复制重命名发票，并生成全套 Excel、PDF 与 A5 交互式 HTML：
 
 ```bash
-# macOS / Linux
-python3 -m invoice_agent organize ./待整理报销 \
-  --mode batch-subfolders \
+python -m invoice_agent organize ./测试发票/0714-0716福州六和 \
   --config ./invoice_agent_config.json \
-  --out-dir ./整理结果 \
-  --traveler 张三 \
-  --department 技术部 \
-  --trip-start-date 2026-03-01 \
-  --trip-end-date 2026-03-03
-```
-
-目录建议：
-
-```text
-待整理报销/
-  2026-03-杭州出差/
-    trip_info.json
-    发票1.pdf
-    酒店/
-      发票2.pdf
-  2026-04-南京出差/
-    trip_info.json
-    发票3.pdf
-```
-
-批量模式只识别根目录下的一级子文件夹。每个子文件夹内部仍会递归扫描；空子文件夹会被跳过；根目录直属票据会报错，避免被静默归入错误的出差包。输出会按子文件夹拆分到：
-
-```text
-整理结果/
-  2026-03-杭州出差/
-    00_报销清单.xlsx
-    01_公司报销单.xlsx
-    01_公司报销单.pdf
-    raw_results.json
-    rename_plan.json
-    trip_audit.json
-  2026-04-南京出差/
-    00_报销清单.xlsx
-    01_公司报销单.xlsx
-    01_公司报销单.pdf
-    raw_results.json
-    rename_plan.json
-    trip_audit.json
-```
-
-## 执行复制重命名
-
-```bash
-# macOS / Linux
-python3 -m invoice_agent organize ./测试发票 \
-  --config ./invoice_agent_config.json \
-  --trip-info ./trip_info.json \
-  --out-dir ./整理结果 \
+  --traveler "石凌杰" \
+  --department "项目部" \
+  --project-name "福州六和" \
+  --trip-start-date "2026-07-14" \
+  --trip-end-date "2026-07-16" \
+  --daily-meal-allowance 50 \
   --apply
 ```
 
-原文件不会被修改。复制后的文件会按识别状态进入：
-
-```text
-01_已识别_重命名/
-02_待人工确认/
-03_重复疑似/
-04_无法识别/
-```
-
-## 本地 Web UI
-
-启动：
+### 3. 启动 Web UI 界面
 
 ```bash
-# macOS / Linux
-python3 -m invoice_agent ui
-
-# Windows
-python -m invoice_agent ui
+python -m invoice_agent ui --port 8000
 ```
 
-> 首次运行前请先 `cd` 到项目根目录（`invoice agent` 文件夹），并在当前目录安装依赖。
->
-> **Windows 用户注意：** 使用 `python` 而不是 `python3`。
-> **macOS / Linux 用户注意：** 使用 `python3` 而不是 `python`。
+---
 
-浏览器打开：
+## 全局 Agent Skill (`invoice-reimbursement`)
 
-```text
-http://127.0.0.1:8765
-```
+本项目已完整固化为 AI Agent 专属技能，安装在 `~/.agents/skills/invoice-reimbursement/`（已通过 TeamAI 同步）。
 
-页面中填写：
+在任何 Agent 会话中，无需手动敲命令行，直接使用自然语言即可唤醒：
 
-- 发票文件夹（可点击"选择"按钮使用系统文件夹选择器）
-- `invoice_agent_config.json` 路径
-- 输出目录（可点击"选择"按钮使用系统文件夹选择器）
-- 人员、部门、出差开始日期、出差结束日期、单日餐补金额
-- 是否复制并重命名
+* “帮我把桌面 `6月合肥出差` 文件夹里的发票报销一下，项目是合肥电站。”
+* “整理一下这个发票文件夹：`D:/发票暂存`”
 
-Web UI 会先完成识别并展示四块预览：
+Agent 会自动遵循两阶段 SOP（阶段一：静默识别、审计诊断与起止日期智能推算；阶段二：用户确认后正式落盘并交付全套成果）。
 
-- 报销清单
-- 类别汇总
-- 重复与风险
-- 行程校对
-- 重命名计划
+---
 
-确认预览无误后点击"确认导出"，才会生成 `00_报销清单.xlsx`。如果勾选"复制并重命名"，复制动作也会在确认导出时执行。
+## 开源协议
 
-UI 提交后会创建后台任务，页面每秒刷新：
-
-- 当前阶段
-- 已用时
-- 完成数量 / 总数量
-- 每个文件的识别状态、类别、金额和提示
-- 识别完成后的预览表格
-- 确认导出后的 Excel 路径
-
-识别过程中可以使用两种取消操作：
-
-- **停止识别**：不再启动新的文件识别，等待当前正在识别的文件完成。
-- **终止任务**：停止本地等待并取消尚未完成的异步识别；操作前会二次确认。
-
-停止或终止后，已经完成的识别结果仍可预览，未完成文件会标记为“已停止”或“已终止”。由于结果不完整，本次任务不能导出，需要重新提交任务。已经提交到 PaddleOCR 服务端的 Job 可能仍会继续运行，但本地不会继续等待或接收其结果。
-
-## 识别速度
-
-默认使用 PaddleOCR 异步 Job API（V1.6 模型）：
-
-- 先批量提交文件
-- 再统一轮询任务结果
-- 默认并发提交数量为 `3`
-- 默认单文件超时为 `120` 秒
-
-如果远端服务限流或断开，可以把 Web UI 中的"并发识别数量"降到 `2`。如果文件很大，可以把"单文件超时秒数"调高。
-
-## 跨平台支持
-
-- **macOS**：使用原生 `osascript` 文件选择器
-- **Windows**：使用 Python 内置 `tkinter` 文件选择器
-- **Linux**：同 macOS，使用 `osascript`（需安装）
-
-## 依赖安装
-
-```bash
-# macOS / Linux
-python3 -m pip install -r requirements.txt
-
-# Windows
-pip install -r requirements.txt
-```
-
-主要依赖：
-
-- `requests` — HTTP 请求
-- `openpyxl` — Excel 生成
+MIT License
