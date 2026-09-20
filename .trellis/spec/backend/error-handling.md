@@ -77,6 +77,13 @@ When the primary OCR provider fails on a document, secondary engines can attempt
 - If both fail, combine their diagnostic error messages:
   `"PaddleOCR失败：{paddle_msg}；MinerU兜底失败：{mineru_msg}"`.
 
+### Local Fast-Path Completeness Gate
+
+数字 PDF 可以先由本地文本层探针解析，但只有结果满足票种的最小关键字段要求时才可跳过 OCR。
+例如，高铁发票必须同时具备有效金额、发票号码、乘车日期、起点和终点；普通发票必须具备有效金额和发票号码。缺失非致命字段（如购买方名称）不应丢弃票据，但缺失关键字段必须交由既有 OCR provider 继续解析。
+
+这样既避免把不完整的本地结果静默输出，也保持扫描件、复杂 PDF 和未知版式的云端兜底能力。相关回归测试应覆盖真实样票的精确字段，以及本地结果不完整时 provider 被调用的路径。
+
 ---
 
 ## Pattern 4: Human-in-the-Loop Confirmation Flags

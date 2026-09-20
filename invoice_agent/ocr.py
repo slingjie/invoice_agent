@@ -421,6 +421,8 @@ class SdkOcrProvider:
         if isinstance(exc, TimeoutError):
             return True
         message = f"{type(exc).__name__}: {exc!r}".lower()
+        if "任务提交队列已满" in str(exc) or "队列已满" in str(exc) or "too many requests" in message:
+            return True
         retryable_fragments = [
             "clientconnectorerror",
             "clientconnectordnserror",

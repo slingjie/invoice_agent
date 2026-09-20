@@ -160,7 +160,24 @@ def build_company_reimbursement_data(
         if fine == "行程交通费":
             travel_rows.append(_travel_row(record, amount, "intercity"))
         elif fine in {"通行费", "市区交通费"}:
-            travel_rows.append(_travel_row(record, amount, "city"))
+            sub_trips = getattr(record, "sub_trips", []) or []
+            has_sub_trip_amounts = len(sub_trips) > 1 and all("amount" in s and s["amount"] for s in sub_trips)
+            if has_sub_trip_amounts:
+                for idx, s in enumerate(sub_trips):
+                    s_amt = parse_amount(s["amount"])
+                    travel_rows.append(
+                        CompanyTravelRow(
+                            kind="city",
+                            date_text=s["date"],
+                            origin=_clean_text(s.get("origin", "")),
+                            destination=_clean_text(s.get("destination", "")),
+                            transport=s.get("transport", "出租车"),
+                            amount=s_amt,
+                            count=1 if idx == 0 else 0,
+                        )
+                    )
+            else:
+                travel_rows.append(_travel_row(record, amount, "city"))
         elif fine == "住宿费":
             lodging_total += amount
         elif fine == "过路费":
@@ -212,7 +229,23 @@ def build_company_reimbursement_data(
 
 
 def _travel_row(record: ExpenseRecord, amount: Decimal, kind: str) -> CompanyTravelRow:
-    transport = "火车" if record.document_type == "高铁发票" else ("公共交通" if kind == "city" else record.document_type)
+    sub_trips = getattr(record, "sub_trips", []) or []
+    if record.document_type == "高铁发票":
+        transport = "火车"
+    elif sub_trips and sub_trips[0].get("transport") == "机票":
+        transport = "机票"
+    elif any(
+        w in str(record.original_name)
+        or w in str(record.description)
+        or w in str(record.seller_name)
+        or w in str(record.raw_text)
+        for w in ["机票", "航空", "航班", "飞猪", "携程", "阿斯兰", "代订机票"]
+    ):
+        transport = "机票"
+    elif kind == "city":
+        transport = "出租车" if any(w in str(record.document_type) for w in ["出租车", "网约车", "滴滴"]) else "公共交通"
+    else:
+        transport = record.document_type
     return CompanyTravelRow(
         kind=kind,
         date_text=record.document_date,

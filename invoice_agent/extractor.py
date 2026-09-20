@@ -131,6 +131,8 @@ def extract_fields_from_text(text: str, path: Path) -> Dict[str, Any]:
         "document_type": detect_document_type(raw, path),
         "issue_date": "",
         "travel_date": "",
+        "travel_dates": [],
+        "sub_trips": [],
         "invoice_number": "",
         "invoice_code": "",
         "seller_name": "",
@@ -166,12 +168,67 @@ def extract_fields_from_text(text: str, path: Path) -> Dict[str, Any]:
         )
         if travel_date:
             fields["travel_date"] = travel_date.group(1)
+            fields["travel_dates"].append(normalize_date(travel_date.group(1)))
         departure_time = re.search(
             r"(?:20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?\s*)?(\d{1,2}:\d{2})\s*开",
             cleaned,
         )
         if departure_time:
             fields["train_departure_time"] = departure_time.group(1)
+
+    # 提取网约车/出租车发票与行程单中的出行日期与子行程
+    didi_dates, didi_orig, didi_dest, didi_subs = extract_didi_table_info(raw)
+    if didi_dates:
+        fields["travel_dates"].extend(didi_dates)
+        fields["sub_trips"].extend(didi_subs)
+        if not fields["travel_date"]:
+            fields["travel_date"] = didi_dates[0]
+        if didi_orig and not fields["origin"]:
+            fields["origin"] = didi_orig
+        if didi_dest and not fields["destination"]:
+            fields["destination"] = didi_dest
+
+    # 提取机票/航空/旅行社发票备注与正文中的航班出行日期与航程
+    flight_dates, flight_orig, flight_dest, flight_subs = extract_flight_info_from_text(raw, cleaned)
+    if flight_dates:
+        fields["travel_dates"].extend(flight_dates)
+        fields["sub_trips"].extend(flight_subs)
+        if not fields["travel_date"]:
+            fields["travel_date"] = flight_dates[0]
+        if flight_orig and not fields["origin"]:
+            fields["origin"] = flight_orig
+        if flight_dest and not fields["destination"]:
+            fields["destination"] = flight_dest
+
+    # 提取行程单起止日期
+    itinerary_range = re.search(
+        r"行程起止日期[：:]\s*(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2})\s*至\s*(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2})",
+        cleaned,
+    )
+    if itinerary_range:
+        d_start = normalize_date(itinerary_range.group(1))
+        d_end = normalize_date(itinerary_range.group(2))
+        if d_start not in fields["travel_dates"]:
+            fields["travel_dates"].append(d_start)
+        if d_end not in fields["travel_dates"]:
+            fields["travel_dates"].append(d_end)
+        if not fields["travel_date"]:
+            fields["travel_date"] = d_start
+
+    # 提取住宿发票入离日期
+    lodging_match = re.search(
+        r"(?:入住[：:]?\s*|入离[：:]?\s*|入离日期[：:]?\s*)(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2})",
+        cleaned,
+    )
+    if lodging_match:
+        lodging_d = normalize_date(lodging_match.group(1))
+        if lodging_d not in fields["travel_dates"]:
+            fields["travel_dates"].append(lodging_d)
+        if not fields["travel_date"]:
+            fields["travel_date"] = lodging_d
+
+    # 去重并排序出行日期
+    fields["travel_dates"] = sorted(list(dict.fromkeys(fields["travel_dates"])))
 
     if not fields["issue_date"]:
         date_match = re.search(r"(20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}|20\d{6})", cleaned)
@@ -309,14 +366,100 @@ def extract_itinerary_route(raw: str) -> Tuple[str, str]:
 
 
 def extract_route_from_filename(stem: str) -> Tuple[str, str]:
-    if "→" not in stem:
-        return "", ""
-    left, right = stem.split("→", 1)
-    left = re.split(r"[\s_-]+", left.strip())[-1]
-    right = re.split(r"[\s_¥￥]+", right.strip())[0]
-    left = re.sub(r"^(?:火车票|退票费|高铁票|行程单)", "", left)
-    right = re.sub(r"(?:火车票|退票费|高铁票|行程单)$", "", right)
-    return left.strip(), right.strip()
+    clean_stem = re.sub(r"【.*?】", "", stem).strip()
+    clean_stem = re.sub(r"^\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}\s*", "", clean_stem)
+
+    if "→" in clean_stem:
+        left, right = clean_stem.split("→", 1)
+        left = re.split(r"[\s_-]+", left.strip())[-1]
+        right = re.split(r"[\s_¥￥]+", right.strip())[0]
+        left = re.sub(r"^(?:火车票|退票费|高铁票|行程单)", "", left)
+        right = re.sub(r"(?:火车票|退票费|高铁票|行程单)$", "", right)
+        return left.strip(), right.strip()
+
+    # 仅当文件名包含交通相关关键词（如机票、飞猪、携程、航班、航线等）时支持连字符路线
+    if any(k in stem for k in ["机票", "飞猪", "携程", "航班", "航线", "客票", "车票"]):
+        segments = re.findall(r"([\u4e00-\u9fa5]{2,6})-([\u4e00-\u9fa5]{2,6})", clean_stem)
+        non_cities = {"餐饮", "服务", "发票", "凭证", "订单", "机票", "行程", "报销", "普通", "专票", "普票"}
+        valid = [
+            (s1, s2)
+            for s1, s2 in segments
+            if not any(nc in s1 or nc in s2 for nc in non_cities)
+        ]
+        if len(valid) >= 2 and valid[0][1] == valid[1][0]:
+            return valid[0][0], valid[1][1]
+        elif len(valid) == 1:
+            return valid[0][0], valid[0][1]
+    return "", ""
+
+
+def extract_flight_info_from_text(raw: str, cleaned: str) -> Tuple[List[str], str, str, List[Dict[str, Any]]]:
+    travel_dates = []
+    sub_trips = []
+    flight_matches = re.findall(
+        r"(\d{4}[/.-]\d{1,2}[/.-]\d{1,2})\s+([\u4e00-\u9fa5A-Za-z0-9·-]+)-([\u4e00-\u9fa5A-Za-z0-9·-]+)\s+([A-Za-z0-9]{2}\d{3,4})",
+        raw,
+    )
+    if flight_matches:
+        for d, o, dest, f_no in flight_matches:
+            norm_d = normalize_date(d)
+            travel_dates.append(norm_d)
+            sub_trips.append({
+                "date": norm_d,
+                "origin": o,
+                "destination": dest,
+                "flight": f_no,
+                "transport": "机票",
+            })
+        if len(flight_matches) >= 2 and flight_matches[0][2] == flight_matches[1][1]:
+            origin = flight_matches[0][1]
+            destination = flight_matches[1][2]
+        else:
+            origin = flight_matches[0][1]
+            destination = flight_matches[0][2]
+        return travel_dates, origin, destination, sub_trips
+    return [], "", "", []
+
+
+def extract_didi_table_info(raw: str) -> Tuple[List[str], str, str, List[Dict[str, Any]]]:
+    travel_dates = []
+    sub_trips = []
+    table_rows = re.findall(r"<tr[^>]*>(.*?)</tr>", raw, re.DOTALL)
+    for r in table_rows:
+        cells = [clean_text(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", r, re.DOTALL)]
+        for i, c in enumerate(cells):
+            d_m = re.fullmatch(r"20\d{2}-\d{2}-\d{2}", c)
+            if d_m:
+                d = d_m.group(0)
+                travel_dates.append(d)
+                orig = cells[i + 1].replace("\\n", " ").replace("\n", " ").strip() if i + 1 < len(cells) else ""
+                dest = cells[i + 2].replace("\\n", " ").replace("\n", " ").strip() if i + 2 < len(cells) else ""
+                trans = cells[i + 3].strip() if i + 3 < len(cells) and cells[i + 3].strip() else "出租车"
+                sub_trips.append({
+                    "date": d,
+                    "origin": orig,
+                    "destination": dest,
+                    "transport": trans,
+                })
+                break
+        if len(cells) >= 8 and re.match(r"^\d+$", cells[0]):
+            time_str = cells[2]
+            tm = re.search(r"(\d{2}-\d{2})", time_str)
+            if tm:
+                y_m = re.search(r"(20\d{2})", raw)
+                year = y_m.group(1) if y_m else "2026"
+                norm_d = f"{year}-{tm.group(1)}"
+                travel_dates.append(norm_d)
+                sub_trips.append({
+                    "date": norm_d,
+                    "origin": cells[4].replace("\\n", " ").replace("\n", " ").strip(),
+                    "destination": cells[5].replace("\\n", " ").replace("\n", " ").strip(),
+                    "amount": cells[7].strip(),
+                    "transport": cells[1] or "出租车",
+                })
+    origin = sub_trips[0]["origin"] if sub_trips else ""
+    destination = sub_trips[-1]["destination"] if sub_trips else ""
+    return travel_dates, origin, destination, sub_trips
 
 
 def infer_description(fields: Dict[str, Any], path: Path) -> str:

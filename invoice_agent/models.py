@@ -64,6 +64,7 @@ class ExpenseRecord:
     linked_group: str = ""
     raw_text: str = ""
     raw_result: Dict[str, Any] = field(default_factory=dict)
+    sub_trips: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def business_duplicate_key(self) -> str:

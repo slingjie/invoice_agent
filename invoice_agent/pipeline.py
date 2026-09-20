@@ -317,16 +317,42 @@ def _parse_records(
     progress_callback: Optional[Callable[[ExpenseRecord], None]] = None,
     cancellation: Optional[CancellationControl] = None,
 ) -> List[ExpenseRecord]:
+    # 极速直通层（0.005s）：本地数字 PDF 探针，直接过滤出具备文本层的发票
+    records_by_path: Dict[Path, ExpenseRecord] = {}
+    pending_paths: List[Path] = []
+
+    for path in paths:
+        if path.suffix.lower() == ".pdf":
+            try:
+                from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally
+                local_doc = probe_pdf_locally(path)
+                if is_fast_probe_result_complete(local_doc):
+                    record = _record_from_parsed(path, trip, local_doc)
+                    records_by_path[path] = record
+                    if progress_callback:
+                        progress_callback(record)
+                    continue
+            except Exception as probe_exc:
+                logger.debug("Local fast-probe failed for %s: %s", path.name, probe_exc)
+        pending_paths.append(path)
+
+    # 若所有 PDF 均被本地极速解析（零网络），直接返回
+    if not pending_paths:
+        return [records_by_path[path] for path in paths if path in records_by_path]
+
+    # 对于本地探针未命中的票据（扫描件、拍照、纯图片等），走外部 OCR 提供商
     if hasattr(provider, "parse_many") and progress_callback is None and cancellation is None:
         try:
-            parsed_docs = provider.parse_many(paths, max_workers=max_workers)  # type: ignore[attr-defined]
+            parsed_docs = provider.parse_many(pending_paths, max_workers=max_workers)  # type: ignore[attr-defined]
         except TypeError:
-            parsed_docs = provider.parse_many(paths)  # type: ignore[attr-defined]
-        return [_record_from_parsed(path, trip, parsed) for path, parsed in zip(paths, parsed_docs)]
-    workers = max(1, min(max_workers, len(paths) or 1))
+            parsed_docs = provider.parse_many(pending_paths)  # type: ignore[attr-defined]
+        for path, parsed in zip(pending_paths, parsed_docs):
+            records_by_path[path] = _record_from_parsed(path, trip, parsed)
+        return [records_by_path[path] for path in paths if path in records_by_path]
+
+    workers = max(1, min(max_workers, len(pending_paths) or 1))
     if workers == 1:
-        records = []
-        for path in paths:
+        for path in pending_paths:
             if cancellation and cancellation.should_stop_starting():
                 break
             record = _record_from_path_with_cancellation(path, trip, provider, cancellation)
@@ -334,27 +360,31 @@ def _parse_records(
                 break
             if progress_callback:
                 progress_callback(record)
-            records.append(record)
-        return records
+            records_by_path[path] = record
+        return [records_by_path[path] for path in paths if path in records_by_path]
+
     if cancellation is not None:
-        return _parse_records_with_cancellation(
-            paths,
+        remaining_records = _parse_records_with_cancellation(
+            pending_paths,
             trip,
             provider,
             workers,
             progress_callback,
             cancellation,
         )
-    records_by_path: Dict[Path, ExpenseRecord] = {}
+        for r in remaining_records:
+            records_by_path[r.source_path] = r
+        return [records_by_path[path] for path in paths if path in records_by_path]
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_record_from_path, path, trip, provider): path for path in paths}
+        futures = {executor.submit(_record_from_path, path, trip, provider): path for path in pending_paths}
         for future in as_completed(futures):
             path = futures[future]
             record = future.result()
             records_by_path[path] = record
             if progress_callback:
                 progress_callback(record)
-    return [records_by_path[path] for path in paths]
+    return [records_by_path[path] for path in paths if path in records_by_path]
 
 
 def _parse_records_with_cancellation(
@@ -413,6 +443,19 @@ def _record_from_path_with_cancellation(
 ) -> ExpenseRecord:
     if cancellation is None:
         return _record_from_path(path, trip, provider)
+    if cancellation.should_stop_starting():
+        return _record_from_parsed(path, trip, _error_document(path, {"code": "CANCELLED", "message": "Task cancelled"}))
+
+    # 优先本地极速探针
+    if path.suffix.lower() == ".pdf":
+        try:
+            from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally
+            local_doc = probe_pdf_locally(path)
+            if is_fast_probe_result_complete(local_doc):
+                return _record_from_parsed(path, trip, local_doc)
+        except Exception:
+            pass
+
     try:
         parsed = provider.parse(path, cancellation=cancellation)  # type: ignore[call-arg]
     except TypeError as exc:
@@ -520,8 +563,76 @@ def resolve_output_dir(folder: Path, project_name: str, out_dir: Optional[Path])
 
 def _record_from_path(path: Path, trip: TripInfo, provider: OcrProvider) -> ExpenseRecord:
     file_hash = sha256_file(path)
-    parsed = provider.parse(path)
+    # 极速直通层（0.005s）：本地数字 PDF 探针，无需走公网 OCR
+    parsed = None
+    if path.suffix.lower() == ".pdf":
+        try:
+            from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally
+            local_doc = probe_pdf_locally(path)
+            if is_fast_probe_result_complete(local_doc):
+                parsed = local_doc
+        except Exception as probe_err:
+            logger.debug("Fast probe error for %s: %s", path.name, probe_err)
+            parsed = None
+
+    if parsed is None or not parsed.ok:
+        parsed = provider.parse(path)
     return _record_from_parsed(path, trip, parsed, file_hash=file_hash)
+
+
+def resolve_actual_service_date(fields: Dict[str, Any], trip: TripInfo, path: Path) -> str:
+    doc_type = str(fields.get("document_type") or "")
+    travel_date = str(fields.get("travel_date") or "").strip()
+    travel_dates = fields.get("travel_dates") or []
+    issue_date = str(fields.get("issue_date") or "").strip()
+    origin = str(fields.get("origin") or "").strip()
+    destination = str(fields.get("destination") or "").strip()
+
+    start_d = str(trip.trip_start_date or "").strip()
+    end_d = str(trip.trip_end_date or "").strip()
+
+    # 1. 优先使用提取到的实际发生日期（出行日期/乘车日期/乘机日期）
+    if travel_dates and start_d and end_d:
+        # 如果有多个出行日期（如网约车往返），找出落在出差区间内的
+        in_range = [d for d in travel_dates if start_d <= d <= end_d]
+        if in_range:
+            return in_range[0]
+
+    if travel_date:
+        return travel_date
+
+    # 2. 如果是城际大交通（机票/代订机票/高铁客票），发票只有开票日期，没有直接写出行日期
+    # 结合航程起止城市与出差起止日程进行智能判别与对照
+    is_intercity = (
+        doc_type in {"普票", "专用发票", "高铁发票", "机票"}
+        or any(
+            w in str(path) or w in str(fields.get("description", "")) or w in str(fields.get("seller_name", ""))
+            for w in ["机票", "航空", "客票", "旅行社", "飞猪", "携程", "同程", "去哪儿"]
+        )
+    )
+    if is_intercity and start_d and end_d:
+        # 判定是否为返程票：目的地为常驻地/出发地（如杭州），或从项目目的地返回
+        is_return = (
+            any(c in destination for c in ["杭州", "出发地", "常驻地"])
+            or (any(c in origin for c in ["胡志明", "河内", "越南", "深圳"]) and "杭州" in destination)
+        )
+        is_depart = (
+            any(c in origin for c in ["杭州"])
+            and any(c in destination for c in ["河内", "胡志明", "越南", "深圳"])
+        )
+        if is_return:
+            return end_d
+        if is_depart:
+            return start_d
+
+        # 若开票日期紧随出差结束日（出差结束当天或1-2天内开票），推断为返程票
+        if issue_date and issue_date >= end_d:
+            return end_d
+        if issue_date and issue_date <= start_d:
+            return start_d
+
+    # 3. 后备：如果均无法判定，才使用发票开票日期
+    return travel_date or issue_date
 
 
 def _record_from_parsed(
@@ -535,9 +646,7 @@ def _record_from_parsed(
     document_type = str(fields.get("document_type") or "其他/无法识别")
     include = bool(parsed.ok and is_invoice_type(document_type))
     total_with_tax = str(fields.get("total_with_tax") or "")
-    document_date = str(
-        (fields.get("travel_date") if document_type == "高铁发票" else fields.get("issue_date")) or ""
-    )
+    document_date = resolve_actual_service_date(fields, trip, path)
     if document_type == "行程单" and not total_with_tax:
         total_with_tax = str(fields.get("total_amount") or "")
     risk_note = ""
@@ -579,6 +688,7 @@ def _record_from_parsed(
         risk_note=risk_note,
         raw_text=parsed.raw_text,
         raw_result=parsed.raw_result,
+        sub_trips=fields.get("sub_trips", []),
     )
 
 
@@ -674,6 +784,8 @@ def _copy_route_from_itinerary(invoice: ExpenseRecord, itinerary: ExpenseRecord)
         invoice.origin = itinerary.origin
     if itinerary.destination and not invoice.destination:
         invoice.destination = itinerary.destination
+    if getattr(itinerary, "sub_trips", None):
+        invoice.sub_trips = itinerary.sub_trips
     if invoice.origin and invoice.destination and (
         not invoice.description or invoice.description == invoice.seller_name
     ):

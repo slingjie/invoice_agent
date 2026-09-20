@@ -259,14 +259,34 @@ def _audit_city_transport(records: List[ExpenseRecord], policy: TripAuditPolicy)
     daily_limit = parse_amount(policy.city_transport_daily_limit)
     if daily_limit <= 0:
         return []
-    by_date: Dict[str, List[ExpenseRecord]] = {}
+    by_date: Dict[str, List[Decimal]] = {}
+    evidence_by_date: Dict[str, List[str]] = {}
+    sequences_by_date: Dict[str, List[int]] = {}
+
     for record in records:
-        if not _is_city_transport(record) or not record.document_date:
+        if not _is_city_transport(record) or not record.include_in_amount:
             continue
-        by_date.setdefault(record.document_date, []).append(record)
+        sub_trips = getattr(record, "sub_trips", []) or []
+        has_sub_trip_amounts = len(sub_trips) > 1 and all("amount" in s and s["amount"] for s in sub_trips)
+        if has_sub_trip_amounts:
+            for s in sub_trips:
+                d = s["date"]
+                amt = parse_amount(s["amount"])
+                by_date.setdefault(d, []).append(amt)
+                evidence_by_date.setdefault(d, []).append(
+                    f"#{record.sequence} {d} {s.get('origin', '')}-{s.get('destination', '')} {amt:.2f}元"
+                )
+                sequences_by_date.setdefault(d, []).append(record.sequence)
+        elif record.document_date:
+            d = record.document_date
+            amt = parse_amount(record.total_with_tax)
+            by_date.setdefault(d, []).append(amt)
+            evidence_by_date.setdefault(d, []).append(_record_brief(record))
+            sequences_by_date.setdefault(d, []).append(record.sequence)
+
     findings = []
-    for day, day_records in sorted(by_date.items()):
-        total = sum((parse_amount(record.total_with_tax) for record in day_records), Decimal("0.00"))
+    for day, day_amounts in sorted(by_date.items()):
+        total = sum(day_amounts, Decimal("0.00"))
         if total <= daily_limit:
             continue
         findings.append(
@@ -274,8 +294,8 @@ def _audit_city_transport(records: List[ExpenseRecord], policy: TripAuditPolicy)
                 category="市内交通",
                 severity="warning",
                 conclusion=f"{day} 市内交通 {total:.2f} 元，超过每日标准 {daily_limit:.2f} 元",
-                evidence=[_record_brief(record) for record in day_records],
-                related_sequences=[record.sequence for record in day_records],
+                evidence=evidence_by_date.get(day, []),
+                related_sequences=list(dict.fromkeys(sequences_by_date.get(day, []))),
                 suggested_action="检查是否有重复报销、跨日行程或需补充超标说明。",
             )
         )
@@ -332,7 +352,12 @@ def _intercity_records(records: Iterable[ExpenseRecord]) -> List[ExpenseRecord]:
     return [
         record
         for record in records
-        if record.document_type in {"高铁发票"} or _has_any(_record_text(record), ["机票", "航班", "铁路", "高铁", "火车"])
+        if record.include_in_amount
+        and (
+            record.document_type in {"高铁发票"}
+            or record.reimbursement_category in {"行程交通费", "城际交通费"}
+            or _has_any(_record_text(record), ["机票", "航班", "铁路", "高铁", "火车", "代订机票", "航空", "阿斯兰", "客票"])
+        )
     ]
 
 
