@@ -38,3 +38,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: 完善本地解析失败防护与诊断
+
+**Date**: 2026-09-22
+**Task**: 完善本地解析失败防护与诊断
+**Branch**: `main`
+
+### Summary
+
+增加本地、PaddleOCR、MinerU和失败的解析轨迹、脱敏原因代码、非阻塞兜底提示、Web诊断汇总及重试刷新；通过全量与真实票包验收。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b410639` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
