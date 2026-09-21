@@ -72,9 +72,21 @@ class ExpenseRecord:
             return ""
         return "|".join([self.invoice_number, self.total_with_tax, self.document_date])
 
+    @property
+    def parse_source(self) -> str:
+        trace = (self.raw_result or {}).get("parse_trace") or {}
+        return str((self.raw_result or {}).get("parse_source") or trace.get("source") or "来源未记录")
+
+    @property
+    def parse_reason_code(self) -> str:
+        trace = (self.raw_result or {}).get("parse_trace") or {}
+        return str((self.raw_result or {}).get("parse_reason_code") or trace.get("reason_code") or "")
+
     def to_json(self) -> Dict[str, Any]:
         data = asdict(self)
         data["source_path"] = str(self.source_path)
+        data["parse_source"] = self.parse_source
+        data["parse_reason_code"] = self.parse_reason_code
         return data
 
 

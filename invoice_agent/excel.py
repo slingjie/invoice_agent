@@ -206,6 +206,7 @@ def build_preview(records: List[ExpenseRecord], trip_audit: TripAuditResult | No
     summary_total, summary_count = _summary_total(summary_rows)
     company_total, company_count = _included_total(records)
     return {
+        "diagnostics": compute_diagnostics(records),
         "review_cards": [_review_card(record) for record in records],
         "overview_rows": [_overview_row(record) for record in records],
         "main_rows": [dict(zip(MAIN_HEADERS, _main_row(record))) for record in records]
@@ -300,6 +301,65 @@ def _trip_audit_rows(trip_audit: TripAuditResult) -> List[dict]:
         }
         for item in trip_audit.items
     ]
+
+
+def parse_source_label(source: str) -> str:
+    labels = {
+        "local_fast_path": "本地极速解析",
+        "paddle_ocr": "云端 OCR",
+        "mineru_fallback": "MinerU 兜底",
+        "failed": "无法识别",
+    }
+    return labels.get(source, "来源未记录" if not source or source == "来源未记录" else source)
+
+
+def compute_diagnostics(records: List[ExpenseRecord]) -> dict:
+    by_source = {
+        "local_fast_path": 0,
+        "paddle_ocr": 0,
+        "mineru_fallback": 0,
+        "failed": 0,
+        "unrecorded": 0,
+    }
+    by_reason_code: Dict[str, int] = {}
+    failed_records = []
+    fallback_count = 0
+
+    for r in records:
+        src = r.parse_source
+        if src in by_source:
+            by_source[src] += 1
+        elif src == "来源未记录" or not src:
+            by_source["unrecorded"] += 1
+        else:
+            by_source[src] = by_source.get(src, 0) + 1
+
+        code = r.parse_reason_code
+        if not code and r.recognition_status == "无法识别":
+            code = "FAILED"
+        if code:
+            by_reason_code[code] = by_reason_code.get(code, 0) + 1
+
+        trace = (r.raw_result or {}).get("parse_trace") or {}
+        if trace.get("fallback_used") or "兜底" in r.risk_note:
+            fallback_count += 1
+
+        if r.recognition_status == "无法识别":
+            failed_records.append({
+                "sequence": r.sequence,
+                "name": r.original_name,
+                "source": src,
+                "reason_code": code or "FAILED",
+                "message": r.risk_note or "无法识别",
+            })
+
+    return {
+        "by_source": by_source,
+        "by_reason_code": by_reason_code,
+        "failed_records": failed_records,
+        "fallback_count": fallback_count,
+        "total_records": len(records),
+    }
 
 
 def _review_card(record: ExpenseRecord) -> dict:

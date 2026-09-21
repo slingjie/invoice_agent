@@ -15,21 +15,26 @@ from urllib.parse import parse_qs, urlparse
 from .analysis import compute_high_level_category
 from .cancellation import CancellationControl
 from .config import load_agent_config
-from .excel import build_preview
+from .excel import build_preview, parse_source_label
 from .models import TripInfo
 from .mineru_fallback import MinerUFallbackProvider
 from .ocr import SdkOcrProvider
 from .pipeline import (
+    FALLBACK_MINERU_NOTE,
     ORGANIZE_MODE_BATCH_SUBFOLDERS,
     ORGANIZE_MODE_SINGLE,
     _assign_names,
     _record_from_parsed,
     _sort_key,
     analyze_records,
+    attach_parse_trace,
+    build_actionable_failure_message,
     export_records,
+    make_parse_trace,
     organize_batch_subfolders,
     organize_folder,
     resolve_output_dir,
+    sanitize_diagnostic_message,
     write_result_files,
 )
 from .scanner import is_inside, is_strict_child, scan_documents
@@ -238,6 +243,7 @@ def render_index(message: str = "", result_html: str = "", start_task_id: str = 
               <button id="export-button" class="secondary" type="button" disabled>确认导出</button>
             </div>
             <div id="batch-packages" class="batch-packages"></div>
+            <div id="preview-diagnostics" class="preview-diagnostics"></div>
             <div class="preview-tabs" aria-label="预览分区">
               <a href="#preview-main">报销清单</a>
               <a href="#preview-summary">类别汇总</a>
@@ -937,13 +943,59 @@ def _maybe_parse_with_mineru(path: Path, parsed, task: Dict):
     )
     mineru = provider.parse(path)
     if mineru.ok:
+        attach_parse_trace(
+            mineru.raw_result,
+            source="mineru_fallback",
+            reason_code="MINERU_SUCCESS",
+            summary="MinerU兜底解析成功",
+            fallback_used=True,
+            fallback_note=FALLBACK_MINERU_NOTE,
+            stages=[
+                {
+                    "stage": "paddle_ocr",
+                    "status": "failed",
+                    "reason_code": (parsed.error or {}).get("code", "SDK_ERROR"),
+                    "message": sanitize_diagnostic_message((parsed.error or {}).get("message", "")),
+                },
+                {
+                    "stage": "mineru_fallback",
+                    "status": "success",
+                    "reason_code": "MINERU_SUCCESS",
+                    "message": "MinerU兜底解析成功",
+                },
+            ],
+        )
         return mineru
-    paddle_message = (parsed.error or {}).get("message", "")
-    mineru_message = (mineru.error or {}).get("message", "")
+
+    paddle_message = sanitize_diagnostic_message((parsed.error or {}).get("message", ""))
+    mineru_message = sanitize_diagnostic_message((mineru.error or {}).get("message", ""))
+    actionable_msg = f"PaddleOCR失败：{paddle_message}；MinerU兜底失败：{mineru_message}"
+    code = (mineru.error or {}).get("code") or (parsed.error or {}).get("code") or "SDK_ERROR"
     parsed.error = {
-        "code": (parsed.error or {}).get("code", "SDK_ERROR"),
-        "message": f"PaddleOCR失败：{paddle_message}；MinerU兜底失败：{mineru_message}",
+        "code": code,
+        "message": actionable_msg,
     }
+    attach_parse_trace(
+        parsed.raw_result,
+        source="failed",
+        reason_code=code,
+        summary=actionable_msg,
+        fallback_used=False,
+        stages=[
+            {
+                "stage": "paddle_ocr",
+                "status": "failed",
+                "reason_code": (parsed.error or {}).get("code", "SDK_ERROR"),
+                "message": paddle_message,
+            },
+            {
+                "stage": "mineru_fallback",
+                "status": "failed",
+                "reason_code": (mineru.error or {}).get("code", "MINERU_ERROR"),
+                "message": mineru_message,
+            },
+        ],
+    )
     return parsed
 
 
@@ -1552,6 +1604,9 @@ def initialize_task_files(task_id: str, folder: Path, output_dir: Path | None) -
             "type": "",
             "amount": "",
             "message": "",
+            "source": "",
+            "source_label": "",
+            "reason_code": "",
         }
         for path in paths
     ]
@@ -1574,6 +1629,9 @@ def mark_task_file_done(task_id: str | None, record) -> None:
                         "type": record.document_type,
                         "amount": record.total_with_tax,
                         "message": task_file_message(record),
+                        "source": record.parse_source,
+                        "source_label": parse_source_label(record.parse_source),
+                        "reason_code": record.parse_reason_code,
                     }
                 )
                 break
@@ -1606,6 +1664,9 @@ def sync_task_files_from_records(task_id: str, records, package_id: str | None =
                     "type": record.document_type,
                     "amount": record.total_with_tax,
                     "message": task_file_message(record),
+                    "source": record.parse_source,
+                    "source_label": parse_source_label(record.parse_source),
+                    "reason_code": record.parse_reason_code,
                 }
             )
         task["completed"] = sum(1 for row in rows if row.get("status") not in {"等待中", "识别中"})

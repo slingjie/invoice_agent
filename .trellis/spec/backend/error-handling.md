@@ -84,6 +84,12 @@ When the primary OCR provider fails on a document, secondary engines can attempt
 
 这样既避免把不完整的本地结果静默输出，也保持扫描件、复杂 PDF 和未知版式的云端兜底能力。相关回归测试应覆盖真实样票的精确字段，以及本地结果不完整时 provider 被调用的路径。
 
+### Parse Trace and Safe Fallback Notice
+
+每个解析结果应在 `raw_result` 中记录 `parse_source`、`parse_reason_code` 与 `parse_trace`，来源仅限本地快速解析、云端 OCR、MinerU 兜底或失败。该轨迹用于预览诊断、JSON 导出和失败重试；重试成功后必须用新的轨迹替换旧失败信息。
+
+本地失败而云端 OCR 成功时，向 `risk_note` 增加“已由云端 OCR 兜底”的非阻塞提示，不得影响金额汇总或导出。对外显示的错误摘要必须先脱敏访问令牌、API key、Bearer 凭据和 URL 查询参数，并截断异常长的服务响应。
+
 ---
 
 ## Pattern 4: Human-in-the-Loop Confirmation Flags

@@ -13,6 +13,7 @@ const previewCompanyForm = document.getElementById('preview-company-form');
 const previewRisks = document.getElementById('preview-risks');
 const previewTripAudit = document.getElementById('preview-trip-audit');
 const previewRename = document.getElementById('preview-rename-content');
+const previewDiagnostics = document.getElementById('preview-diagnostics');
 const exportButton = document.getElementById('export-button');
 const batchPackages = document.getElementById('batch-packages');
 const flowSteps = Array.from(document.querySelectorAll('[data-flow-step]'));
@@ -32,6 +33,7 @@ let pollTimer = null;
 let currentTaskId = null;
 let currentPackageId = null;
 let currentTaskMode = 'single';
+let currentPreviewDiagnostics = null;
 const tableColumnVisibility = {};
 
 function toggleConfigPanel() {
@@ -201,9 +203,11 @@ function renderTask(task) {
 
   rows.innerHTML = (task.files || []).map((file) => {
     const cls = file.status === '已识别' ? 'badge-ok' : (file.status === '失败' || file.status === '无法识别' ? 'badge-error' : 'badge-run');
+    const sourceLabel = file.source_label || (file.source === 'local_fast_path' ? '本地极速' : (file.source === 'paddle_ocr' ? '云端OCR' : (file.source === 'mineru_fallback' ? 'MinerU兜底' : '')));
+    const sourceTag = sourceLabel ? `<span class="badge badge-source" style="margin-left:4px;font-size:0.75rem;background:#e2e8f0;color:#334155;">${escapeHtml(sourceLabel)}</span>` : '';
     return `<tr>
       <td>${escapeHtml(file.name || '')}</td>
-      <td><span class="badge ${cls}">${escapeHtml(file.status || '')}</span></td>
+      <td><span class="badge ${cls}">${escapeHtml(file.status || '')}</span>${sourceTag}</td>
       <td>${escapeHtml(file.type || '')}</td>
       <td>${escapeHtml(file.amount || '')}</td>
       <td>${escapeHtml(file.message || '')}</td>
@@ -414,7 +418,11 @@ function renderPreview(preview, packageId = null) {
     return;
   }
   currentPackageId = packageId;
+  currentPreviewDiagnostics = preview.diagnostics || null;
   previewPanel.classList.add('active');
+  if (previewDiagnostics) {
+    previewDiagnostics.innerHTML = renderDiagnosticsPanel(preview.diagnostics || null);
+  }
   if ((preview.review_cards || []).length) {
     previewMain.innerHTML = `${renderOverviewTable(preview.overview_rows || [])}${renderReviewCards(preview.review_cards || [])}`;
   } else {
@@ -425,6 +433,74 @@ function renderPreview(preview, packageId = null) {
   previewRisks.innerHTML = renderTable(preview.risk_rows || [], ['序号', '原文件名', '凭证类别', '重复标记', '识别状态', '风险提示'], 'preview-table risk-preview-table');
   previewTripAudit.innerHTML = renderTripAudit(preview || {});
   previewRename.innerHTML = renderTable(preview.rename_rows || [], ['序号', '原文件路径', '新文件名', '复制后路径', '是否执行'], 'preview-table rename-preview-table', 'rename');
+}
+
+function renderDiagnosticsPanel(diagnostics) {
+  if (!diagnostics) {
+    return '';
+  }
+  const bySource = diagnostics.by_source || {};
+  const byCode = diagnostics.by_reason_code || {};
+  const failed = diagnostics.failed_records || [];
+  const localCount = bySource.local_fast_path || 0;
+  const paddleCount = bySource.paddle_ocr || 0;
+  const mineruCount = bySource.mineru_fallback || 0;
+  const failedCount = bySource.failed || 0;
+  const fallbackCount = diagnostics.fallback_count || 0;
+
+  const codePills = Object.entries(byCode).map(([code, count]) => {
+    return `<span class="diag-pill" style="display:inline-block; margin:2px 4px; padding:2px 6px; background:#f1f5f9; border-radius:4px; font-family:monospace; font-size:0.75rem;">${escapeHtml(code)}: ${count}</span>`;
+  }).join('');
+
+  let failedActionHtml = '';
+  if (failed.length > 0) {
+    failedActionHtml = `
+      <div class="diag-failed-box" style="margin-top: 10px; padding: 10px 12px; background: #fff1f2; border: 1px solid #fecdd3; border-radius: 6px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="color:#b91c1c; font-size:0.875rem; font-weight:600;">发现 ${failed.length} 张无法识别票据</span>
+          <button type="button" class="secondary" id="copy-diagnostics-btn" style="font-size:0.75rem; padding:3px 8px;">复制诊断信息</button>
+        </div>
+        <ul style="margin:8px 0 0 16px; padding:0; font-size:0.8125rem; color:#475569;">
+          ${failed.map(f => `<li style="margin-bottom:4px;"><strong>#${escapeHtml(f.sequence)} ${escapeHtml(f.name)}</strong> [${escapeHtml(f.reason_code)}]: ${escapeHtml(f.message)}</li>`).join('')}
+        </ul>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="diagnostics-summary-panel" style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:12px 16px; margin: 12px 0;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <strong style="font-size:0.9375rem; color:#1e293b;">🔍 解析诊断与来源统计</strong>
+        <span style="font-size:0.8125rem; color:#64748b;">云端/MinerU兜底: <strong>${fallbackCount}</strong> 张</span>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:0.8125rem; margin-bottom: 6px;">
+        <span class="badge" style="background:#dcfce7; color:#166534; padding:3px 8px;">本地极速: ${localCount}</span>
+        <span class="badge" style="background:#e0e7ff; color:#3730a3; padding:3px 8px;">云端OCR: ${paddleCount}</span>
+        <span class="badge" style="background:#fef3c7; color:#92400e; padding:3px 8px;">MinerU兜底: ${mineruCount}</span>
+        <span class="badge" style="background:${failedCount ? '#fee2e2' : '#f1f5f9'}; color:${failedCount ? '#991b1b' : '#64748b'}; padding:3px 8px;">无法识别: ${failedCount}</span>
+      </div>
+      ${codePills ? `<div style="font-size:0.75rem; color:#64748b; margin-top:6px;">原因代码分布：${codePills}</div>` : ''}
+      ${failedActionHtml}
+    </div>
+  `;
+}
+
+function copyDiagnosticsInfo(button) {
+  if (!currentPreviewDiagnostics || !currentPreviewDiagnostics.failed_records) {
+    return;
+  }
+  const failed = currentPreviewDiagnostics.failed_records;
+  const lines = failed.map((f) => `序号: ${f.sequence} | 文件: ${f.name} | 来源: ${f.source} | 原因代码: ${f.reason_code} | 错误原因: ${f.message}`);
+  const text = `【发票解析诊断报告】\n失败总数: ${failed.length}\n${lines.join('\n')}`;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      const original = button.textContent;
+      button.textContent = '已复制诊断信息！';
+      setTimeout(() => { button.textContent = original; }, 2000);
+    });
+  } else {
+    alert(text);
+  }
 }
 
 function renderTripAudit(preview) {
@@ -870,6 +946,11 @@ previewPanel.addEventListener('change', function(event) {
 });
 
 previewPanel.addEventListener('click', function(event) {
+  const copyDiagBtn = event.target.closest('#copy-diagnostics-btn');
+  if (copyDiagBtn) {
+    copyDiagnosticsInfo(copyDiagBtn);
+    return;
+  }
   const retryButton = event.target.closest('[data-review-retry]');
   if (retryButton) {
     retryRecord(retryButton.dataset.reviewRetry, retryButton);

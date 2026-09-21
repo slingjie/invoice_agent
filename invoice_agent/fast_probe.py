@@ -593,10 +593,31 @@ def probe_pdf_locally(path: Path) -> Optional[ParsedDocument]:
                     "change_fee": fields.get("change_fee", ""),
                     "description": fields.get("description", path.stem[:40]),
                 }
+                raw_res = {
+                    "probe": probe_name,
+                    "fast_path": True,
+                    "parse_source": "local_fast_path",
+                    "parse_reason_code": "LOCAL_SUCCESS",
+                    "parse_trace": {
+                        "source": "local_fast_path",
+                        "reason_code": "LOCAL_SUCCESS",
+                        "summary": "本地快速探针解析成功",
+                        "fallback_used": False,
+                        "fallback_note": "",
+                        "stages": [
+                            {
+                                "stage": "local_fast_probe",
+                                "status": "success",
+                                "reason_code": "LOCAL_SUCCESS",
+                                "message": f"命中探针 {probe_name}",
+                            }
+                        ],
+                    },
+                }
                 return ParsedDocument(
                     source_path=path,
                     raw_text=text,
-                    raw_result={"probe": probe_name, "fast_path": True},
+                    raw_result=raw_res,
                     fields=full_fields,
                     ok=True,
                 )
@@ -648,3 +669,45 @@ def is_fast_probe_result_complete(doc: Optional[ParsedDocument]) -> bool:
         return False
 
     return True
+
+
+def probe_pdf_locally_detailed(path: Path) -> Tuple[Optional[ParsedDocument], str, str]:
+    """
+    详细本地探针调用，返回 (doc, reason_code, message)。
+    用于在流水线中准确记录本地阶段的状态与回退原因。
+    """
+    try:
+        text = extract_pdf_embedded_text(path, max_pages=2)
+        if len(text) < 40:
+            return None, "LOCAL_NO_TEXT", "PDF未提取到有效文本层或文本过短"
+    except Exception as exc:
+        return None, "LOCAL_ERROR", f"PDF文本提取异常: {exc}"
+
+    try:
+        doc = probe_pdf_locally(path)
+    except Exception as exc:
+        return None, "LOCAL_ERROR", f"本地探针执行异常: {exc}"
+
+    if doc is None:
+        return None, "LOCAL_NO_MATCH", "本地探针规则未匹配已知票据格式"
+
+    if not is_fast_probe_result_complete(doc):
+        missing = []
+        fields = doc.fields or {}
+        doc_type = fields.get("document_type", "")
+        if not fields.get("total_with_tax"):
+            missing.append("金额")
+        if doc_type == "高铁发票":
+            if not fields.get("origin") or not fields.get("destination"):
+                missing.append("起终点")
+            if not fields.get("travel_date"):
+                missing.append("乘车日期")
+            if not fields.get("invoice_number"):
+                missing.append("发票号码")
+        elif doc_type != "行程单":
+            if not fields.get("invoice_number"):
+                missing.append("发票号码")
+        detail = "、".join(missing) if missing else "必要字段"
+        return doc, "LOCAL_INCOMPLETE", f"本地解析缺少关键字段（{detail}）"
+
+    return doc, "LOCAL_SUCCESS", "本地快速探针解析成功"

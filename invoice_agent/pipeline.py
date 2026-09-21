@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
@@ -8,7 +9,92 @@ from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+
+logger = logging.getLogger(__name__)
+
+FALLBACK_CLOUD_NOTE = "已由云端 OCR 兜底"
+FALLBACK_MINERU_NOTE = "PaddleOCR失败后使用MinerU兜底解析"
+
+
+def sanitize_diagnostic_message(text: Any) -> str:
+    """脱敏错误与诊断信息，去除 token、密钥、URL 参数及截断超长响应体。"""
+    if text is None:
+        return ""
+    s = str(text).strip()
+    if not s:
+        return ""
+    s = re.sub(
+        r"(?i)(access_token|token|api_?key|secret|password|bearer|auth|authorization)([\s:=]+)[^\s&\"',;]+",
+        r"\1\2***REDACTED***",
+        s,
+    )
+    s = re.sub(
+        r"([?&](?:access_token|token|api_?key|key)=)[^&\s\"']+",
+        r"\1***REDACTED***",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(r"[\r\n\t]+", " ", s).strip()
+    if len(s) > 200:
+        s = s[:197] + "..."
+    return s
+
+
+def build_actionable_failure_message(code: str, raw_message: str) -> str:
+    """生成面向用户的、可行动的安全失败提示。"""
+    sanitized = sanitize_diagnostic_message(raw_message)
+    if code in {"CONFIG_ERROR"}:
+        return f"配置缺失（{code}）：{sanitized}，请检查服务配置"
+    if code in {"TIMEOUT", "MINERU_TIMEOUT"}:
+        return f"解析超时（{code}）：{sanitized}，请检查网络后重新识别"
+    if code in {"RATE_LIMIT"}:
+        return f"频率超限（{code}）：{sanitized}，请稍后重试"
+    if code in {"CANCELLED"}:
+        return "任务已取消"
+    if sanitized:
+        return f"识别失败（{code}）：{sanitized}，可重新识别或人工录入"
+    return f"识别失败（{code}），可重新识别或人工录入"
+
+
+def make_parse_trace(
+    source: str,
+    reason_code: str,
+    summary: str = "",
+    fallback_used: bool = False,
+    fallback_note: str = "",
+    stages: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    return {
+        "source": source,
+        "reason_code": reason_code,
+        "summary": summary,
+        "fallback_used": fallback_used,
+        "fallback_note": fallback_note,
+        "stages": stages or [],
+    }
+
+
+def attach_parse_trace(
+    raw_result: Dict[str, Any],
+    source: str,
+    reason_code: str,
+    summary: str = "",
+    fallback_used: bool = False,
+    fallback_note: str = "",
+    stages: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    raw_result["parse_source"] = source
+    raw_result["parse_reason_code"] = reason_code
+    raw_result["parse_trace"] = make_parse_trace(
+        source=source,
+        reason_code=reason_code,
+        summary=summary,
+        fallback_used=fallback_used,
+        fallback_note=fallback_note,
+        stages=stages,
+    )
+    return raw_result
 
 from .analysis import assign_reimbursement_categories
 from .cancellation import CancellationControl
@@ -320,20 +406,42 @@ def _parse_records(
     # 极速直通层（0.005s）：本地数字 PDF 探针，直接过滤出具备文本层的发票
     records_by_path: Dict[Path, ExpenseRecord] = {}
     pending_paths: List[Path] = []
+    local_probe_failures: Dict[Path, Dict[str, Any]] = {}
 
     for path in paths:
         if path.suffix.lower() == ".pdf":
             try:
-                from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally
-                local_doc = probe_pdf_locally(path)
-                if is_fast_probe_result_complete(local_doc):
+                from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally_detailed
+                local_doc, p_code, p_msg = probe_pdf_locally_detailed(path)
+                if local_doc and is_fast_probe_result_complete(local_doc):
+                    attach_parse_trace(
+                        local_doc.raw_result,
+                        source="local_fast_path",
+                        reason_code="LOCAL_SUCCESS",
+                        summary="本地快速探针解析成功",
+                        fallback_used=False,
+                        stages=[{"stage": "local_fast_probe", "status": "success", "reason_code": "LOCAL_SUCCESS", "message": "本地快速探针解析成功"}],
+                    )
                     record = _record_from_parsed(path, trip, local_doc)
                     records_by_path[path] = record
                     if progress_callback:
                         progress_callback(record)
                     continue
+                else:
+                    local_probe_failures[path] = {
+                        "stage": "local_fast_probe",
+                        "status": "failed",
+                        "reason_code": p_code,
+                        "message": sanitize_diagnostic_message(p_msg),
+                    }
             except Exception as probe_exc:
                 logger.debug("Local fast-probe failed for %s: %s", path.name, probe_exc)
+                local_probe_failures[path] = {
+                    "stage": "local_fast_probe",
+                    "status": "failed",
+                    "reason_code": "LOCAL_ERROR",
+                    "message": sanitize_diagnostic_message(str(probe_exc)),
+                }
         pending_paths.append(path)
 
     # 若所有 PDF 均被本地极速解析（零网络），直接返回
@@ -347,7 +455,63 @@ def _parse_records(
         except TypeError:
             parsed_docs = provider.parse_many(pending_paths)  # type: ignore[attr-defined]
         for path, parsed in zip(pending_paths, parsed_docs):
-            records_by_path[path] = _record_from_parsed(path, trip, parsed)
+            fb_note = ""
+            stages = []
+            if path in local_probe_failures:
+                local_stage = local_probe_failures[path]
+                stages.append(local_stage)
+                if parsed.ok:
+                    fb_note = FALLBACK_CLOUD_NOTE
+                    stages.append({"stage": "paddle_ocr", "status": "success", "reason_code": "PADDLE_SUCCESS", "message": "云端OCR解析成功"})
+                    attach_parse_trace(
+                        parsed.raw_result,
+                        source="paddle_ocr",
+                        reason_code="PADDLE_SUCCESS",
+                        summary="已由云端 OCR 兜底",
+                        fallback_used=True,
+                        fallback_note=FALLBACK_CLOUD_NOTE,
+                        stages=stages,
+                    )
+                else:
+                    code = (parsed.error or {}).get("code") or "SDK_ERROR"
+                    msg = sanitize_diagnostic_message((parsed.error or {}).get("message", ""))
+                    actionable = build_actionable_failure_message(code, msg)
+                    parsed.error = {"code": code, "message": actionable}
+                    stages.append({"stage": "paddle_ocr", "status": "failed", "reason_code": code, "message": msg})
+                    attach_parse_trace(
+                        parsed.raw_result,
+                        source="failed",
+                        reason_code=code,
+                        summary=actionable,
+                        fallback_used=False,
+                        stages=stages,
+                    )
+            else:
+                if parsed.ok:
+                    stages.append({"stage": "paddle_ocr", "status": "success", "reason_code": "PADDLE_SUCCESS", "message": "云端OCR解析成功"})
+                    attach_parse_trace(
+                        parsed.raw_result,
+                        source="paddle_ocr",
+                        reason_code="PADDLE_SUCCESS",
+                        summary="云端OCR解析成功",
+                        fallback_used=False,
+                        stages=stages,
+                    )
+                else:
+                    code = (parsed.error or {}).get("code") or "SDK_ERROR"
+                    msg = sanitize_diagnostic_message((parsed.error or {}).get("message", ""))
+                    actionable = build_actionable_failure_message(code, msg)
+                    parsed.error = {"code": code, "message": actionable}
+                    stages.append({"stage": "paddle_ocr", "status": "failed", "reason_code": code, "message": msg})
+                    attach_parse_trace(
+                        parsed.raw_result,
+                        source="failed",
+                        reason_code=code,
+                        summary=actionable,
+                        fallback_used=False,
+                        stages=stages,
+                    )
+            records_by_path[path] = _record_from_parsed(path, trip, parsed, fallback_note=fb_note)
         return [records_by_path[path] for path in paths if path in records_by_path]
 
     workers = max(1, min(max_workers, len(pending_paths) or 1))
@@ -435,26 +599,45 @@ def _parse_records_with_cancellation(
     return [records_by_path[path] for path in paths if path in records_by_path]
 
 
-def _record_from_path_with_cancellation(
+def _parse_single_document_resilient(
     path: Path,
-    trip: TripInfo,
     provider: OcrProvider,
-    cancellation: Optional[CancellationControl],
-) -> ExpenseRecord:
-    if cancellation is None:
-        return _record_from_path(path, trip, provider)
-    if cancellation.should_stop_starting():
-        return _record_from_parsed(path, trip, _error_document(path, {"code": "CANCELLED", "message": "Task cancelled"}))
+    cancellation: Optional[CancellationControl] = None,
+) -> Tuple[ParsedDocument, str]:
+    if cancellation and cancellation.should_stop_starting():
+        err_doc = _error_document(path, {"code": "CANCELLED", "message": "Task cancelled"})
+        attach_parse_trace(err_doc.raw_result, source="failed", reason_code="CANCELLED", summary="任务已取消")
+        return err_doc, ""
 
-    # 优先本地极速探针
+    local_failure_stage = None
     if path.suffix.lower() == ".pdf":
         try:
-            from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally
-            local_doc = probe_pdf_locally(path)
-            if is_fast_probe_result_complete(local_doc):
-                return _record_from_parsed(path, trip, local_doc)
-        except Exception:
-            pass
+            from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally_detailed
+            local_doc, p_code, p_msg = probe_pdf_locally_detailed(path)
+            if local_doc and is_fast_probe_result_complete(local_doc):
+                attach_parse_trace(
+                    local_doc.raw_result,
+                    source="local_fast_path",
+                    reason_code="LOCAL_SUCCESS",
+                    summary="本地快速探针解析成功",
+                    fallback_used=False,
+                    stages=[{"stage": "local_fast_probe", "status": "success", "reason_code": "LOCAL_SUCCESS", "message": "本地快速探针解析成功"}],
+                )
+                return local_doc, ""
+            local_failure_stage = {
+                "stage": "local_fast_probe",
+                "status": "failed",
+                "reason_code": p_code,
+                "message": sanitize_diagnostic_message(p_msg),
+            }
+        except Exception as probe_err:
+            logger.debug("Fast probe error for %s: %s", path.name, probe_err)
+            local_failure_stage = {
+                "stage": "local_fast_probe",
+                "status": "failed",
+                "reason_code": "LOCAL_ERROR",
+                "message": sanitize_diagnostic_message(str(probe_err)),
+            }
 
     try:
         parsed = provider.parse(path, cancellation=cancellation)  # type: ignore[call-arg]
@@ -462,7 +645,59 @@ def _record_from_path_with_cancellation(
         if "cancellation" not in str(exc):
             raise
         parsed = provider.parse(path)
-    return _record_from_parsed(path, trip, parsed)
+
+    fallback_note = ""
+    stages = [local_failure_stage] if local_failure_stage else []
+    if parsed.ok:
+        if local_failure_stage:
+            fallback_note = FALLBACK_CLOUD_NOTE
+            stages.append({"stage": "paddle_ocr", "status": "success", "reason_code": "PADDLE_SUCCESS", "message": "云端OCR解析成功"})
+            attach_parse_trace(
+                parsed.raw_result,
+                source="paddle_ocr",
+                reason_code="PADDLE_SUCCESS",
+                summary="已由云端 OCR 兜底",
+                fallback_used=True,
+                fallback_note=FALLBACK_CLOUD_NOTE,
+                stages=stages,
+            )
+        else:
+            stages.append({"stage": "paddle_ocr", "status": "success", "reason_code": "PADDLE_SUCCESS", "message": "云端OCR解析成功"})
+            attach_parse_trace(
+                parsed.raw_result,
+                source="paddle_ocr",
+                reason_code="PADDLE_SUCCESS",
+                summary="云端OCR解析成功",
+                fallback_used=False,
+                stages=stages,
+            )
+    else:
+        code = (parsed.error or {}).get("code") or "SDK_ERROR"
+        msg = sanitize_diagnostic_message((parsed.error or {}).get("message", ""))
+        actionable = build_actionable_failure_message(code, msg)
+        parsed.error = {"code": code, "message": actionable}
+        stages.append({"stage": "paddle_ocr", "status": "failed", "reason_code": code, "message": msg})
+        attach_parse_trace(
+            parsed.raw_result,
+            source="failed",
+            reason_code=code,
+            summary=actionable,
+            fallback_used=False,
+            stages=stages,
+        )
+
+    return parsed, fallback_note
+
+
+def _record_from_path_with_cancellation(
+    path: Path,
+    trip: TripInfo,
+    provider: OcrProvider,
+    cancellation: Optional[CancellationControl],
+) -> ExpenseRecord:
+    file_hash = sha256_file(path)
+    parsed, fallback_note = _parse_single_document_resilient(path, provider, cancellation=cancellation)
+    return _record_from_parsed(path, trip, parsed, file_hash=file_hash, fallback_note=fallback_note)
 
 
 def resolve_trip_info(
@@ -563,21 +798,8 @@ def resolve_output_dir(folder: Path, project_name: str, out_dir: Optional[Path])
 
 def _record_from_path(path: Path, trip: TripInfo, provider: OcrProvider) -> ExpenseRecord:
     file_hash = sha256_file(path)
-    # 极速直通层（0.005s）：本地数字 PDF 探针，无需走公网 OCR
-    parsed = None
-    if path.suffix.lower() == ".pdf":
-        try:
-            from .fast_probe import is_fast_probe_result_complete, probe_pdf_locally
-            local_doc = probe_pdf_locally(path)
-            if is_fast_probe_result_complete(local_doc):
-                parsed = local_doc
-        except Exception as probe_err:
-            logger.debug("Fast probe error for %s: %s", path.name, probe_err)
-            parsed = None
-
-    if parsed is None or not parsed.ok:
-        parsed = provider.parse(path)
-    return _record_from_parsed(path, trip, parsed, file_hash=file_hash)
+    parsed, fallback_note = _parse_single_document_resilient(path, provider)
+    return _record_from_parsed(path, trip, parsed, file_hash=file_hash, fallback_note=fallback_note)
 
 
 def resolve_actual_service_date(fields: Dict[str, Any], trip: TripInfo, path: Path) -> str:
@@ -640,6 +862,7 @@ def _record_from_parsed(
     trip: TripInfo,
     parsed: ParsedDocument,
     file_hash: Optional[str] = None,
+    fallback_note: str = "",
 ) -> ExpenseRecord:
     file_hash = file_hash or sha256_file(path)
     fields = parsed.fields if parsed.ok else {}
@@ -656,7 +879,56 @@ def _record_from_parsed(
         date_label = "乘车日期" if document_type == "高铁发票" else "日期"
         risk_note = f"缺少发票号码/{date_label}/金额"
     if not parsed.ok:
-        risk_note = (parsed.error or {}).get("message", "")
+        err = parsed.error or {}
+        code = err.get("code") or "SDK_ERROR"
+        raw_msg = err.get("message") or ""
+        sanitized_msg = sanitize_diagnostic_message(raw_msg)
+        risk_note = sanitized_msg or build_actionable_failure_message(code, "")
+
+    # 非阻塞兜底提示加入 risk_note
+    if fallback_note and parsed.ok:
+        if risk_note:
+            if fallback_note not in risk_note:
+                risk_note = f"{fallback_note}；{risk_note}"
+        else:
+            risk_note = fallback_note
+
+    # 规范化并注入 raw_result 轨迹
+    raw_res = dict(parsed.raw_result or {})
+    if "parse_source" not in raw_res:
+        if parsed.ok:
+            if raw_res.get("fast_path") or raw_res.get("probe"):
+                source = "local_fast_path"
+                code = "LOCAL_SUCCESS"
+                summary = "本地快速探针解析成功"
+            elif raw_res.get("provider") == "mineru_fallback":
+                source = "mineru_fallback"
+                code = "MINERU_SUCCESS"
+                summary = "MinerU兜底解析成功"
+            else:
+                source = "paddle_ocr"
+                code = "PADDLE_SUCCESS"
+                summary = "已由云端 OCR 兜底" if fallback_note else "云端OCR解析成功"
+            attach_parse_trace(
+                raw_res,
+                source=source,
+                reason_code=code,
+                summary=summary,
+                fallback_used=bool(fallback_note),
+                fallback_note=fallback_note,
+            )
+        else:
+            code = (parsed.error or {}).get("code") or "SDK_ERROR"
+            attach_parse_trace(
+                raw_res,
+                source="failed",
+                reason_code=code,
+                summary=risk_note or "识别失败",
+                fallback_used=False,
+            )
+    elif fallback_note and raw_res.get("parse_trace"):
+        raw_res["parse_trace"]["fallback_used"] = True
+        raw_res["parse_trace"]["fallback_note"] = fallback_note
     return ExpenseRecord(
         sequence=0,
         source_path=path,
